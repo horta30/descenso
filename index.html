@@ -1095,8 +1095,18 @@ function updateParts(dt){
 //  AUDIO
 // ════════════════════════════════════════════════════════════════════
 var AC = null, muted = false, windGain = null, windSrc = null;
+var audioFallo = false;
 function initAudio(){
-  if (AC) return;
+  if (AC || audioFallo) return;
+  try { initAudioReal(); } catch(e){
+    // Si el navegador bloquea el audio, el juego sigue andando mudo.
+    // Sin este try/catch la excepcion mataba el manejador del clic
+    // ANTES de arrancar la partida: quedaba un juego que nunca larga.
+    audioFallo = true; AC = null;
+    console.warn('audio no disponible, se juega en silencio');
+  }
+}
+function initAudioReal(){
   AC = new (window.AudioContext||window.webkitAudioContext)();
   // Viento: ruido filtrado cuya frecuencia sube con la velocidad.
   // Es el truco más barato que existe para "sentir" la velocidad.
