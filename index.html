@@ -11,20 +11,33 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d1014;touch-action
 body{display:flex;justify-content:center;align-items:center;font-family:'Segoe UI',Arial,sans-serif}
 canvas{position:absolute;transform-origin:center center;touch-action:none;
   box-shadow:0 0 80px rgba(0,0,0,.6);image-rendering:auto}
-.btn{position:fixed;z-index:50;width:42px;height:42px;border-radius:50%;
+/* Fila de botones centrada arriba. En flex se reacomodan solos cuando
+   el de compartir se agranda al llegar a meta, sin taparse entre si. */
+#hudBtns{position:fixed;z-index:50;top:max(10px,env(safe-area-inset-top));
+  left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center}
+.btn{position:relative;flex:0 0 auto;width:42px;height:42px;border-radius:50%;
   background:rgba(20,26,32,.8);border:2px solid rgba(120,200,255,.35);color:#fff;
   font-size:17px;display:flex;align-items:center;justify-content:center;cursor:pointer;
   user-select:none;-webkit-user-select:none;touch-action:manipulation}
 .btn:active{transform:scale(.9)}
 /* Arriba al centro: es la única zona que el HUD del canvas deja libre */
-#skinBtn{top:max(10px,env(safe-area-inset-top));left:50%;margin-left:-96px;width:auto;padding:0 14px;border-radius:21px;font-size:12px;font-weight:bold;letter-spacing:.5px}
-#muteBtn{top:max(10px,env(safe-area-inset-top));left:50%;margin-left:56px}
+#skinBtn{width:auto;padding:0 14px;border-radius:21px;font-size:12px;font-weight:bold;letter-spacing:.5px}
+#shareBtn{background:rgba(18,74,44,.85);border-color:rgba(94,240,180,.5)}
+/* Al llegar a meta el boton se agranda y se etiqueta: ese es el momento
+   en que la persona realmente quiere compartir su tiempo. */
+#shareBtn.destacado{width:auto;padding:0 15px;border-radius:21px;font-size:12px;
+  font-weight:bold;letter-spacing:.3px;
+  background:#1c9c56;border-color:#5ef0b4;box-shadow:0 0 18px rgba(94,240,180,.45)}
+
 </style>
 </head>
 <body>
 <canvas id="c" width="800" height="450"></canvas>
+<div id="hudBtns">
 <button class="btn" id="skinBtn">🚵 MTB</button>
+<button class="btn" id="shareBtn" aria-label="Compartir por WhatsApp">📲</button>
 <button class="btn" id="muteBtn">🔊</button>
+</div>
 <script>
 "use strict";
 
@@ -2122,6 +2135,7 @@ function frame(now){
   if (splitFlash > 0) splitFlash = Math.max(0, splitFlash - dt*1.6);
   updateRig(dt);
   updateWind();
+  refrescarBotonCompartir();
   try { render(); } catch(e){ console.error(e); }
 }
 
@@ -2202,6 +2216,45 @@ document.getElementById('skinBtn').addEventListener('click', function(e){
   skin = SKINS[(SKINS.indexOf(skin)+1) % SKINS.length];
   this.textContent = SKIN_LABEL[skin];
 });
+// ── Compartir por WhatsApp ──────────────────────────────────────────
+// Si SHARE_URL queda vacio, el juego reparte la pagina que lo tiene
+// incrustado (la web de Gravitas). Solo si no puede saberla usa la suya.
+// Asi el enlace compartido lleva trafico al sitio, no a GitHub.
+var SHARE_URL = '';
+
+function urlParaCompartir(){
+  if (SHARE_URL) return SHARE_URL;
+  try {
+    if (window.top !== window.self && document.referrer) return document.referrer.split('#')[0];
+  } catch(e){}
+  return location.href.split('#')[0];
+}
+
+function textoParaCompartir(){
+  var url = urlParaCompartir();
+  if (phase === 'finish')
+    return '\u{1F6B5} Baj\u{00E9} ' + S().name + ' en ' + fmtTime(finalTime) + ' en DESCENSO.\n\u{00BF}Le ganas?\n\n' + url;
+  if (bestTime[stageId])
+    return '\u{1F6B5} Mi mejor tiempo en ' + S().name + ': ' + fmtTime(bestTime[stageId]) + ' en DESCENSO.\n\u{00BF}Le ganas?\n\n' + url;
+  return '\u{1F6B5} DESCENSO \u2014 bajada en bici contrarreloj. Dos etapas: alta monta\u{00F1}a y el Cerro Abajo de Valpara\u{00ED}so.\n\n' + url;
+}
+
+var shareBtn = document.getElementById('shareBtn');
+function compartir(e){
+  e.preventDefault(); e.stopPropagation();
+  window.open('https://wa.me/?text=' + encodeURIComponent(textoParaCompartir()), '_blank', 'noopener');
+}
+shareBtn.addEventListener('click', compartir);
+shareBtn.addEventListener('touchstart', compartir, {passive:false});
+
+function refrescarBotonCompartir(){
+  var destacar = (phase === 'finish');
+  if (destacar === shareBtn._destacado) return;
+  shareBtn._destacado = destacar;
+  shareBtn.className   = 'btn' + (destacar ? ' destacado' : '');
+  shareBtn.textContent = destacar ? '\u{1F4F2} Compartir mi tiempo' : '\u{1F4F2}';
+}
+
 document.getElementById('muteBtn').addEventListener('click', function(e){
   e.stopPropagation();
   muted = !muted;
