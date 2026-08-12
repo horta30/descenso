@@ -258,14 +258,25 @@ function buildSprites(){
 
   // ── Público (silueta simple, da vida al circuito) ─────────────────
   SPR.crowd = makeSprite(120, 130, function(c,w,h){
-    var cols=['#e05a2a','#2f6fb0','#f0c020','#d84a6a','#3aa85a','#e8e8e8'];
-    for(var i=0;i<5;i++){
-      var x = 14 + i*22 + rnd(-4,4), bh = h*rnd(0.62,0.88);
-      c.fillStyle = cols[i%cols.length];
-      c.fillRect(x-7, h-bh, 14, bh-14);
-      c.beginPath(); c.arc(x, h-bh+2, 8, 0, Math.PI*2); c.fill();
-      c.fillStyle='rgba(0,0,0,.25)';
-      c.fillRect(x-7, h-16, 14, 16);
+    // Ropa apagada y alturas dispares: un publico real no es una fila
+    // de palitos de colores del mismo alto.
+    var cols=['#8d99a6','#5f6b78','#a8724f','#c9c3b6','#4f5e6b','#7d6a5c','#9c5a4a','#6b7f6a'];
+    var piel=['#e8c39e','#c79a72','#a5734f','#f0d3b4'];
+    for(var i=0;i<6;i++){
+      var x = 10 + i*19 + ((i*7)%5) - 2;
+      var bh = h*(0.52 + ((i*13)%7)/13);
+      var brazos = (i%3===0);
+      c.fillStyle = cols[(i*3)%cols.length];
+      c.fillRect(x-6, h-bh, 12, bh-12);
+      if (brazos){                       // alentando con los brazos arriba
+        c.lineWidth=4; c.lineCap='round'; c.strokeStyle=cols[(i*3)%cols.length];
+        c.beginPath(); c.moveTo(x-5,h-bh+8); c.lineTo(x-13,h-bh-10); c.stroke();
+        c.beginPath(); c.moveTo(x+5,h-bh+8); c.lineTo(x+13,h-bh-10); c.stroke();
+      }
+      c.fillStyle = piel[(i*5)%piel.length];
+      c.beginPath(); c.arc(x, h-bh-1, 6.5, 0, Math.PI*2); c.fill();
+      c.fillStyle='rgba(0,0,0,.30)';
+      c.fillRect(x-6, h-13, 12, 13);
     }
   });
 
@@ -484,44 +495,71 @@ function buildSprites(){
   }
   SPR.valla = valla(false);
 
-  // ── Muro de zinc acanalado, pegado al borde ───────────────────────
-  function zinc(col, dark){
-    return makeSprite(160, 260, function(c,w,h){
-      c.fillStyle = col; c.fillRect(0, 0, w, h);
-      c.strokeStyle = dark; c.lineWidth = 3;
-      for (var k=0; k<w; k+=11){
-        c.beginPath(); c.moveTo(k, 0); c.lineTo(k, h); c.stroke();
-      }
-      c.fillStyle = 'rgba(255,255,255,.12)'; c.fillRect(0, 0, w, 10);
-      c.fillStyle = 'rgba(0,0,0,.18)'; c.fillRect(0, h-16, w, 16);
-      // Rayado / grafiti
-      c.strokeStyle = 'rgba(30,28,32,.5)'; c.lineWidth = 5; c.lineCap='round';
+  // ── Fachada de cerro, pegada al borde ─────────────────────────────
+  // Antes eran rectangulos rayados de colores fuertes y parecian silos
+  // o contenedores de puerto. Una fachada necesita techo, ventana y
+  // puerta para leerse como casa y no como un objeto abstracto.
+  function fachada(muro, techo, sombra){
+    return makeSprite(170, 250, function(c,w,h){
+      var ty = 40;
+      // Alero de zinc
+      c.fillStyle = techo;
       c.beginPath();
-      c.moveTo(w*0.2, h*0.42); c.quadraticCurveTo(w*0.5, h*0.22, w*0.78, h*0.46);
-      c.stroke();
+      c.moveTo(0, ty+16); c.lineTo(w*0.5, ty-14); c.lineTo(w, ty+16);
+      c.lineTo(w, ty+26); c.lineTo(0, ty+26); c.closePath(); c.fill();
+      c.fillStyle = 'rgba(0,0,0,.20)';
+      c.beginPath(); c.moveTo(w*0.5, ty-14); c.lineTo(w, ty+16); c.lineTo(w, ty+26);
+      c.lineTo(w*0.5, ty+26); c.closePath(); c.fill();
+      // Muro acanalado
+      c.fillStyle = muro; c.fillRect(6, ty+24, w-12, h-ty-24);
+      c.strokeStyle = sombra; c.lineWidth = 2;
+      for (var k=14; k<w-12; k+=12){
+        c.beginPath(); c.moveTo(k, ty+24); c.lineTo(k, h); c.stroke();
+      }
+      c.fillStyle = 'rgba(0,0,0,.16)'; c.fillRect(w-46, ty+24, 40, h-ty-24);
+      // Ventana con marco
+      var wx = 26, wy = ty+58;
+      c.fillStyle = '#1e2a33'; c.fillRect(wx, wy, 46, 52);
+      c.fillStyle = 'rgba(246,232,196,.45)'; c.fillRect(wx+4, wy+4, 17, 21);
+      c.strokeStyle = '#efeae0'; c.lineWidth = 4; c.strokeRect(wx, wy, 46, 52);
+      c.beginPath(); c.moveTo(wx+23, wy); c.lineTo(wx+23, wy+52); c.stroke();
+      // Puerta
+      c.fillStyle = techo; c.fillRect(w-72, h-78, 40, 78);
+      c.fillStyle = 'rgba(0,0,0,.28)'; c.fillRect(w-72, h-78, 9, 78);
+      // Zocalo
+      c.fillStyle = 'rgba(0,0,0,.24)'; c.fillRect(6, h-14, w-12, 14);
     });
   }
-  // Colores gastados por el sol y la sal, no de caramelo. En Valparaíso
-  // el color es fuerte pero está viejo: hay que bajarle la saturación.
-  SPR.zincs = [ zinc('#7f9a7c','#5d7359'), zinc('#b07158','#87503c'),
-                zinc('#c6bda8','#9a9284'), zinc('#7b93a6','#5a6d7c'),
-                zinc('#c0a866','#94804a'), zinc('#a8a29a','#807b74') ];
+  SPR.fachadas = [
+    fachada('#9aa79a','#6f7d72','#7d8a7f'), fachada('#b39184','#8a6455','#9a7b70'),
+    fachada('#c2bcae','#8f8878','#a8a294'), fachada('#94a3ae','#6b7a86','#7f8d98'),
+    fachada('#bfae86','#8f8058','#a89974'), fachada('#a8a29a','#7d7770','#948e86')
+  ];
 
-  // Muro con mural — Valparaíso es una ciudad pintada
-  SPR.mural = makeSprite(260, 170, function(c,w,h){
-    c.fillStyle='#d8d2c4'; c.fillRect(0,0,w,h);
-    c.fillStyle='#c8c0b0'; c.fillRect(0,h-16,w,16);
-    var pal=['#e2604a','#f0b429','#3f8fb0','#7bb661','#d9556e'];
-    for(var b=0;b<5;b++){
-      c.fillStyle=pal[b];
-      c.beginPath();
-      c.moveTo(18+b*46, h-24);
-      c.quadraticCurveTo(30+b*46, 22+((b*37)%40), 52+b*46, h-24);
-      c.closePath(); c.fill();
-    }
-    c.fillStyle='rgba(255,255,255,.35)';
-    c.beginPath(); c.arc(w*0.72, h*0.30, 22, 0, Math.PI*2); c.fill();
-  });
+  // ── Lienzo de auspiciador sobre la valla ──────────────────────────
+  // Reemplaza al mural abstracto, que parecia un grafico de barras.
+  // En la referencia del Cerro Abajo la valla va forrada de lienzos:
+  // eso es lo que dice "esto es una carrera" y ademas es el espacio
+  // comercial real del evento.
+  function lienzo(fondo, texto, tinta){
+    return makeSprite(340, 120, function(c,w,h){
+      c.fillStyle = fondo; c.fillRect(0, 0, w, h);
+      c.fillStyle = 'rgba(255,255,255,.10)'; c.fillRect(0, 0, w, 10);
+      c.fillStyle = 'rgba(0,0,0,.22)'; c.fillRect(0, h-12, w, 12);
+      c.fillStyle = tinta;
+      c.font = 'bold 58px Impact,Arial Black,sans-serif';
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText(texto, w/2, h/2 + 2);
+      // amarras a la valla
+      c.fillStyle = 'rgba(0,0,0,.35)';
+      for (var k=0; k<4; k++) c.fillRect(18 + k*(w-36)/3 - 3, 2, 6, 9);
+    });
+  }
+  SPR.lienzos = [
+    lienzo('#123f8c', 'GRAVITAS', '#ffffff'),
+    lienzo('#e8e4da', 'STAGE CRONO', '#123f8c'),
+    lienzo('#0f2233', 'CERRO ABAJO', '#f0a022')
+  ];
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -585,7 +623,7 @@ function decorValpo(s, i){
 
   // ── Muros de zinc justo detrás de la valla: la quebrada es angosta
   if (Math.random() < 0.55)
-    s.sprites.push({ src: pick(SPR.zincs), off: (Math.random()<0.5?-1:1)*rnd(1.30, 1.55) });
+    s.sprites.push({ src: pick(SPR.fachadas), off: (Math.random()<0.5?-1:1)*rnd(1.30, 1.55) });
 
   // Casas del cerro, escalonadas hacia arriba
   if (Math.random() < 0.45)
@@ -595,7 +633,7 @@ function decorValpo(s, i){
 
   if (i % 23 === 0) s.sprites.push({ src: SPR.escalera, off: (Math.random()<0.5?-1:1)*rnd(1.60,1.95) });
   if (i % 12 === 0) s.sprites.push({ src: SPR.poste, off: (i%24===0?-1:1)*1.22 });
-  if (i % 31 === 0) s.sprites.push({ src: SPR.mural, off: (Math.random()<0.5?-1:1)*rnd(1.34,1.50) });
+  if (i % 26 === 0) s.sprites.push({ src: pick(SPR.lienzos), off: (i%52===0?-1:1)*1.07 });
 
   // Tramos de escalera sobre el propio pavimento
   if (i % 40 < 7) s.decal = 'stairs';
@@ -1712,86 +1750,123 @@ function povActivo(){ return camMode === 'pov' && !haciendoTruco(); }
 function drawPOV(){
   if (phase === 'menu') return;
   var sp  = speed / MAX_SPEED;
-  var rot = steerVis * 0.075 + rig.bikeLean * 0.09;
-  var sus = rig.susF * 11 + rig.bob * 1.8;
-  var cx0 = W/2 - (playerX - camX) * 22;
 
-  // Medidas tomadas de la referencia: el manubrio ocupa el tercio
-  // inferior del cuadro, no la mitad. Todo se ancla al borde de abajo.
-  var BY   = H - 74;      // altura del manubrio
-  var CY   = H - 56;      // corona de la horquilla
-  var BW   = 212;         // media envergadura del manubrio
-  var TW   = 13;          // media anchura del neumatico
+  // Movimiento del manubrio MUY marcado: en un descenso el rider mueve
+  // la bici debajo del cuerpo. Antes era tan sutil que no se notaba.
+  var st   = steerVis;
+  var rot  = st * 0.20 + rig.bikeLean * 0.15;
+  var tilt = st * 16;            // un puno baja y el otro sube (el giro real)
+  var lat  = -st * 34;           // el conjunto se corre hacia el lado
+  var sus  = rig.susF * 11 + rig.bob * 1.8;
+  var cx0  = W/2 - (playerX - camX) * 22 + lat;
+
+  var BY = H - 78;     // altura de los punos
+  var CY = H - 52;     // corona de la horquilla
+  var BW = 214;        // media envergadura
+  var RISE = 22;       // subida del riser sobre la potencia
+  var TW = 13;
 
   ctx.save();
   ctx.translate(cx0, H + sus);
   ctx.rotate(rot);
   ctx.translate(-cx0, -H);
 
-  // ── Neumatico delantero, visto casi desde arriba
+  // ── Neumatico: gira con la direccion
+  var tx = cx0 + st * 16;
   ctx.fillStyle = '#0d0e10';
   ctx.beginPath();
-  ctx.moveTo(cx0-TW, H); ctx.lineTo(cx0-TW*0.80, CY+4);
-  ctx.lineTo(cx0+TW*0.80, CY+4); ctx.lineTo(cx0+TW, H);
+  ctx.moveTo(cx0-TW, H); ctx.lineTo(tx-TW*0.78, CY+6);
+  ctx.lineTo(tx+TW*0.78, CY+6); ctx.lineTo(cx0+TW, H);
   ctx.closePath(); ctx.fill();
   ctx.fillStyle = '#1c1f23';
   for (var k=0; k<5; k++){
-    var t = k/5, yy = H - t*(H-CY-4), ww = TW*(1-t*0.20);
-    ctx.fillRect(cx0-ww-1.5, yy-4, 3.5, 4);
-    ctx.fillRect(cx0+ww-2,   yy-4, 3.5, 4);
+    var t = k/5, yy = H - t*(H-CY-6);
+    var ww = TW*(1-t*0.20), xx = cx0 + (tx-cx0)*t;
+    ctx.fillRect(xx-ww-1.5, yy-4, 3.5, 4);
+    ctx.fillRect(xx+ww-2,   yy-4, 3.5, 4);
   }
 
-  // ── Botellas y barras de la horquilla
+  // ── Horquilla
   ctx.lineCap = 'butt';
   ctx.strokeStyle = '#23262c'; ctx.lineWidth = 13;
-  ctx.beginPath(); ctx.moveTo(cx0-31, H);  ctx.lineTo(cx0-25, CY+16); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx0+31, H);  ctx.lineTo(cx0+25, CY+16); ctx.stroke();
-  ctx.strokeStyle = '#b3bbc5'; ctx.lineWidth = 8.5;
-  ctx.beginPath(); ctx.moveTo(cx0-25, CY+18); ctx.lineTo(cx0-21, CY); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx0+25, CY+18); ctx.lineTo(cx0+21, CY); ctx.stroke();
-  ctx.strokeStyle = 'rgba(255,255,255,.32)'; ctx.lineWidth = 2.2;
-  ctx.beginPath(); ctx.moveTo(cx0-27, CY+17); ctx.lineTo(cx0-23, CY+1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx0-31, H); ctx.lineTo(tx-24, CY+16); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx0+31, H); ctx.lineTo(tx+24, CY+16); ctx.stroke();
+  ctx.strokeStyle = '#b3bbc5'; ctx.lineWidth = 9;
+  ctx.beginPath(); ctx.moveTo(tx-24, CY+18); ctx.lineTo(tx-20, CY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(tx+24, CY+18); ctx.lineTo(tx+20, CY); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.30)'; ctx.lineWidth = 2.2;
+  ctx.beginPath(); ctx.moveTo(tx-26, CY+17); ctx.lineTo(tx-22, CY+1); ctx.stroke();
 
-  // ── Corona y potencia
-  ctx.fillStyle = '#2b3038'; ctx.fillRect(cx0-24, CY-7, 48, 11);
-  ctx.fillStyle = '#3d434c'; ctx.fillRect(cx0-10, CY-14, 20, 9);
-  ctx.fillStyle = '#d85a22'; ctx.fillRect(cx0-10, CY-14, 20, 2);
+  // ── Doble corona y potencia corta de DH
+  ctx.fillStyle = '#2b3038'; ctx.fillRect(tx-26, CY-6, 52, 10);
+  ctx.fillStyle = '#22262c'; ctx.fillRect(tx-24, CY-16, 48, 8);
+  ctx.fillStyle = '#3d434c'; ctx.fillRect(tx-11, CY-24, 22, 10);
+  ctx.fillStyle = '#d85a22'; ctx.fillRect(tx-11, CY-24, 22, 2.5);
 
-  // ── Manubrio, con leve subida hacia el centro
-  ctx.strokeStyle = '#15171a'; ctx.lineWidth = 8.5; ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(cx0-BW, BY+13);
-  ctx.quadraticCurveTo(cx0, BY-7, cx0+BW, BY+13);
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(196,204,214,.28)'; ctx.lineWidth = 2.4;
-  ctx.beginPath();
-  ctx.moveTo(cx0-BW+8, BY+10);
-  ctx.quadraticCurveTo(cx0, BY-10, cx0+BW-8, BY+10);
-  ctx.stroke();
+  // ── MANUBRIO CON RISE ─────────────────────────────────────────────
+  // No es una barra plana: sube desde la potencia (el rise), despues
+  // sale hacia los lados y barre hacia atras. Por eso son tres tramos.
+  var clampY = CY - 20;
+  var topY   = clampY - RISE;        // arriba del rise
+  var gripL  = { x: cx0-BW, y: BY + 16 - tilt };
+  var gripR  = { x: cx0+BW, y: BY + 16 + tilt };
 
-  // ── Manetas de freno
-  ctx.strokeStyle = '#c3cad3'; ctx.lineWidth = 3.4;
-  ctx.beginPath(); ctx.moveTo(cx0-BW+44, BY+15); ctx.lineTo(cx0-BW+10, BY+25); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx0+BW-44, BY+15); ctx.lineTo(cx0+BW-10, BY+25); ctx.stroke();
+  function barra(ancho, color){
+    ctx.strokeStyle = color; ctx.lineWidth = ancho; ctx.lineCap = 'round';
+    // tramo de subida, a los dos lados de la potencia
+    ctx.beginPath();
+    ctx.moveTo(tx-13, clampY); ctx.lineTo(tx-19, topY);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(tx+13, clampY); ctx.lineTo(tx+19, topY);
+    ctx.stroke();
+    // tramo horizontal + barrido hacia atras hasta los punos
+    ctx.beginPath();
+    ctx.moveTo(tx-19, topY);
+    ctx.bezierCurveTo(cx0-BW*0.52, topY-3, cx0-BW*0.86, gripL.y-16, gripL.x+10, gripL.y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(tx+19, topY);
+    ctx.bezierCurveTo(cx0+BW*0.52, topY-3, cx0+BW*0.86, gripR.y-16, gripR.x-10, gripR.y);
+    ctx.stroke();
+  }
+  barra(15, '#15171a');                        // tubo grueso de DH
+  barra(4.5, 'rgba(198,206,216,.26)');         // brillo superior
 
-  // ── Manos enguantadas y antebrazos saliendo de cuadro
-  function mano(x, y, lado){
-    ctx.fillStyle = '#101215';
-    ctx.beginPath(); ctx.ellipse(x, y, 15, 7, lado*0.10, 0, Math.PI*2); ctx.fill();
+  // Abrazadera de la potencia sobre el rise
+  ctx.fillStyle = '#3d434c'; ctx.fillRect(tx-16, topY-6, 32, 12);
+  ctx.fillStyle = '#1b1e23'; ctx.fillRect(tx-16, topY-1, 32, 2);
+
+  // ── Punos con anillos, manetas y manos
+  function puno(g, lado){
+    ctx.save();
+    ctx.translate(g.x, g.y);
+    ctx.rotate(lado * (0.22 + st*lado*0.10));
+    // maneta de freno
+    ctx.strokeStyle = '#c3cad3'; ctx.lineWidth = 3.6; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(lado*6, 6); ctx.lineTo(lado*40, 15); ctx.stroke();
+    // puno
+    ctx.fillStyle = '#111417';
+    ctx.beginPath(); ctx.ellipse(0, 0, 30, 9.5, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#d85a22';
+    ctx.fillRect(-lado*30, -9, 6, 18);
+    ctx.fillRect(lado*16, -9, 5, 18);
+    ctx.restore();
+    // mano enguantada y antebrazo saliendo de cuadro
     ctx.fillStyle = '#1b2431';
     ctx.beginPath();
-    ctx.moveTo(x + lado*13, y-9);
-    ctx.lineTo(x + lado*62, H);
-    ctx.lineTo(x + lado*10, H);
-    ctx.lineTo(x - lado*4, y+9);
+    ctx.moveTo(g.x + lado*14, g.y-10);
+    ctx.lineTo(g.x + lado*66, H);
+    ctx.lineTo(g.x + lado*8,  H);
+    ctx.lineTo(g.x - lado*6,  g.y+10);
     ctx.closePath(); ctx.fill();
     ctx.fillStyle = '#27334a';
-    ctx.beginPath(); ctx.ellipse(x + lado*11, y+1, 16, 9.5, lado*0.16, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(g.x + lado*10, g.y+1, 17, 10.5, lado*0.16, 0, Math.PI*2); ctx.fill();
     ctx.fillStyle = '#0e1116';
-    ctx.beginPath(); ctx.ellipse(x - lado*3, y+8, 11, 4.5, lado*0.2, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(g.x - lado*4, g.y+9, 12, 5, lado*0.2, 0, Math.PI*2); ctx.fill();
   }
-  mano(cx0-BW+16, BY+18, -1);
-  mano(cx0+BW-16, BY+18,  1);
+  puno(gripL, -1);
+  puno(gripR,  1);
 
   ctx.restore();
 }
