@@ -35,6 +35,7 @@ canvas{position:absolute;transform-origin:center center;touch-action:none;
 <canvas id="c" width="800" height="450"></canvas>
 <div id="hudBtns">
 <button class="btn" id="skinBtn">🚵 MTB</button>
+<button class="btn" id="viewBtn" aria-label="Cambiar vista">👁</button>
 <button class="btn" id="shareBtn" aria-label="Compartir por WhatsApp">📲</button>
 <button class="btn" id="muteBtn">🔊</button>
 </div>
@@ -918,7 +919,10 @@ function update(dt){
   lean = lerp(lean, targetLean, 1 - Math.pow(0.004, dt));
 
   // Cámara con retardo → el rider se despega del centro al doblar
-  camX = lerp(camX, playerX, 1 - Math.pow(0.0015, dt));
+  // En POV la camara sigue mas pegada al rider. En tercera persona
+  // conviene el retardo, porque asi la bici se despega del centro al
+  // doblar; en primera persona ese retardo solo hace patinar el mundo.
+  camX = lerp(camX, playerX, 1 - Math.pow(camMode === 'pov' ? 0.00002 : 0.0015, dt));
 
   // Pendiente de los próximos ~24 segmentos. Positiva = vas bajando.
   var slope = (segY(position + PLAYER_Z) - segY(position + PLAYER_Z + SEG_LEN*24)) / 24;
@@ -1692,6 +1696,106 @@ function drawBody(B, j){
   ctx.restore();
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  VISTA POV — manubrio, manos y rueda delantera
+//  Es el encuadre de todas las referencias de GoPro. Resuelve de raiz
+//  el problema del rider: aqui solo hay un objeto fijo pegado a la
+//  camara, siempre en el mismo angulo.
+//  Los trucos NO se juegan en POV: al despegar de una rampa la camara
+//  salta sola a tercera persona para que el giro se lea, y vuelve al
+//  aterrizar. Un backflip en primera persona marea y no se entiende.
+// ════════════════════════════════════════════════════════════════════
+var camMode = 'pov';                 // 'pov' | 'chase'
+function haciendoTruco(){ return airborne && (spinDir !== 0 || flipDir !== 0); }
+function povActivo(){ return camMode === 'pov' && !haciendoTruco(); }
+
+function drawPOV(){
+  if (phase === 'menu') return;
+  var sp  = speed / MAX_SPEED;
+  var rot = steerVis * 0.075 + rig.bikeLean * 0.09;
+  var sus = rig.susF * 11 + rig.bob * 1.8;
+  var cx0 = W/2 - (playerX - camX) * 22;
+
+  // Medidas tomadas de la referencia: el manubrio ocupa el tercio
+  // inferior del cuadro, no la mitad. Todo se ancla al borde de abajo.
+  var BY   = H - 74;      // altura del manubrio
+  var CY   = H - 56;      // corona de la horquilla
+  var BW   = 212;         // media envergadura del manubrio
+  var TW   = 13;          // media anchura del neumatico
+
+  ctx.save();
+  ctx.translate(cx0, H + sus);
+  ctx.rotate(rot);
+  ctx.translate(-cx0, -H);
+
+  // ── Neumatico delantero, visto casi desde arriba
+  ctx.fillStyle = '#0d0e10';
+  ctx.beginPath();
+  ctx.moveTo(cx0-TW, H); ctx.lineTo(cx0-TW*0.80, CY+4);
+  ctx.lineTo(cx0+TW*0.80, CY+4); ctx.lineTo(cx0+TW, H);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#1c1f23';
+  for (var k=0; k<5; k++){
+    var t = k/5, yy = H - t*(H-CY-4), ww = TW*(1-t*0.20);
+    ctx.fillRect(cx0-ww-1.5, yy-4, 3.5, 4);
+    ctx.fillRect(cx0+ww-2,   yy-4, 3.5, 4);
+  }
+
+  // ── Botellas y barras de la horquilla
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = '#23262c'; ctx.lineWidth = 13;
+  ctx.beginPath(); ctx.moveTo(cx0-31, H);  ctx.lineTo(cx0-25, CY+16); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx0+31, H);  ctx.lineTo(cx0+25, CY+16); ctx.stroke();
+  ctx.strokeStyle = '#b3bbc5'; ctx.lineWidth = 8.5;
+  ctx.beginPath(); ctx.moveTo(cx0-25, CY+18); ctx.lineTo(cx0-21, CY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx0+25, CY+18); ctx.lineTo(cx0+21, CY); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.32)'; ctx.lineWidth = 2.2;
+  ctx.beginPath(); ctx.moveTo(cx0-27, CY+17); ctx.lineTo(cx0-23, CY+1); ctx.stroke();
+
+  // ── Corona y potencia
+  ctx.fillStyle = '#2b3038'; ctx.fillRect(cx0-24, CY-7, 48, 11);
+  ctx.fillStyle = '#3d434c'; ctx.fillRect(cx0-10, CY-14, 20, 9);
+  ctx.fillStyle = '#d85a22'; ctx.fillRect(cx0-10, CY-14, 20, 2);
+
+  // ── Manubrio, con leve subida hacia el centro
+  ctx.strokeStyle = '#15171a'; ctx.lineWidth = 8.5; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(cx0-BW, BY+13);
+  ctx.quadraticCurveTo(cx0, BY-7, cx0+BW, BY+13);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(196,204,214,.28)'; ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  ctx.moveTo(cx0-BW+8, BY+10);
+  ctx.quadraticCurveTo(cx0, BY-10, cx0+BW-8, BY+10);
+  ctx.stroke();
+
+  // ── Manetas de freno
+  ctx.strokeStyle = '#c3cad3'; ctx.lineWidth = 3.4;
+  ctx.beginPath(); ctx.moveTo(cx0-BW+44, BY+15); ctx.lineTo(cx0-BW+10, BY+25); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx0+BW-44, BY+15); ctx.lineTo(cx0+BW-10, BY+25); ctx.stroke();
+
+  // ── Manos enguantadas y antebrazos saliendo de cuadro
+  function mano(x, y, lado){
+    ctx.fillStyle = '#101215';
+    ctx.beginPath(); ctx.ellipse(x, y, 15, 7, lado*0.10, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#1b2431';
+    ctx.beginPath();
+    ctx.moveTo(x + lado*13, y-9);
+    ctx.lineTo(x + lado*62, H);
+    ctx.lineTo(x + lado*10, H);
+    ctx.lineTo(x - lado*4, y+9);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#27334a';
+    ctx.beginPath(); ctx.ellipse(x + lado*11, y+1, 16, 9.5, lado*0.16, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#0e1116';
+    ctx.beginPath(); ctx.ellipse(x - lado*3, y+8, 11, 4.5, lado*0.2, 0, Math.PI*2); ctx.fill();
+  }
+  mano(cx0-BW+16, BY+18, -1);
+  mano(cx0+BW-16, BY+18,  1);
+
+  ctx.restore();
+}
+
 function drawRider(){
   if (phase === 'menu') return;
   if (invuln > 0 && Math.floor(elapsed*18) % 2 === 0) return;
@@ -2101,8 +2205,18 @@ function render(){
   }
   drawBackdrop();
   renderRoad();
-  drawRider();
+  var pov = povActivo();
+  if (!pov) drawRider();
   ctx.restore();
+
+  // El manubrio va fuera del temblor del mundo: esta agarrado a ti,
+  // no al terreno. Solo recibe una fraccion de la sacudida.
+  if (pov){
+    ctx.save();
+    if (shake > 0.05) ctx.translate(rnd(-shake,shake)*0.35, rnd(-shake,shake)*0.35);
+    drawPOV();
+    ctx.restore();
+  }
 
   drawSpeedFx();
 
@@ -2144,7 +2258,7 @@ function frame(now){
 // ════════════════════════════════════════════════════════════════════
 var KEYMAP = {
   ArrowLeft:'left', KeyA:'left', ArrowRight:'right', KeyD:'right',
-  ArrowUp:'up', KeyW:'up', ArrowDown:'down', KeyS:'down',
+  ArrowUp:'up', KeyW:'up', ArrowDown:'down', KeyS:'down', KeyC:'vista',
   Space:'jump', ShiftLeft:'brake'
 };
 // Desde el menú, ← → eligen etapa y cualquier otra tecla larga.
@@ -2156,6 +2270,7 @@ function advance(){
 }
 document.addEventListener('keydown', function(e){
   var k = KEYMAP[e.code];
+  if (k === 'vista'){ alternarVista(); e.preventDefault(); return; }
   if (k){ keys[k] = true; e.preventDefault(); }
   initAudio();
   if (phase === 'menu' && (k === 'left' || k === 'right')){
@@ -2254,6 +2369,16 @@ function refrescarBotonCompartir(){
   shareBtn.className   = 'btn' + (destacar ? ' destacado' : '');
   shareBtn.textContent = destacar ? '\u{1F4F2} Compartir mi tiempo' : '\u{1F4F2}';
 }
+
+var viewBtn = document.getElementById('viewBtn');
+function alternarVista(e){
+  if (e){ e.preventDefault(); e.stopPropagation(); }
+  camMode = (camMode === 'pov') ? 'chase' : 'pov';
+  viewBtn.textContent = (camMode === 'pov') ? '\u{1F441}' : '\u{1F6B5}';
+  viewBtn.title = (camMode === 'pov') ? 'Vista manubrio' : 'Vista rider';
+}
+viewBtn.addEventListener('click', alternarVista);
+viewBtn.addEventListener('touchstart', alternarVista, {passive:false});
 
 document.getElementById('muteBtn').addEventListener('click', function(e){
   e.stopPropagation();
