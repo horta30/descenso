@@ -1,0 +1,2229 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>DESCENSO — Motor v2 (prototipo)</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{width:100%;height:100%;overflow:hidden;background:#0d1014;touch-action:none}
+body{display:flex;justify-content:center;align-items:center;font-family:'Segoe UI',Arial,sans-serif}
+canvas{position:absolute;transform-origin:center center;touch-action:none;
+  box-shadow:0 0 80px rgba(0,0,0,.6);image-rendering:auto}
+.btn{position:fixed;z-index:50;width:42px;height:42px;border-radius:50%;
+  background:rgba(20,26,32,.8);border:2px solid rgba(120,200,255,.35);color:#fff;
+  font-size:17px;display:flex;align-items:center;justify-content:center;cursor:pointer;
+  user-select:none;-webkit-user-select:none;touch-action:manipulation}
+.btn:active{transform:scale(.9)}
+/* Arriba al centro: es la única zona que el HUD del canvas deja libre */
+#skinBtn{top:max(10px,env(safe-area-inset-top));left:50%;margin-left:-96px;width:auto;padding:0 14px;border-radius:21px;font-size:12px;font-weight:bold;letter-spacing:.5px}
+#muteBtn{top:max(10px,env(safe-area-inset-top));left:50%;margin-left:56px}
+</style>
+</head>
+<body>
+<canvas id="c" width="800" height="450"></canvas>
+<button class="btn" id="skinBtn">🚵 MTB</button>
+<button class="btn" id="muteBtn">🔊</button>
+<script>
+"use strict";
+
+// ════════════════════════════════════════════════════════════════════
+//  DESCENSO — motor pseudo-3D por segmentos
+//  La pista es una lista de segmentos, cada uno con su altura (y) y su
+//  curvatura. Se proyectan de lejos a cerca. De ahí salen las bajadas,
+//  las lomas que te lanzan y las curvas — sin 3D real, sin librerías.
+// ════════════════════════════════════════════════════════════════════
+
+var cv = document.getElementById('c'), ctx = cv.getContext('2d');
+var W = 800, H = 450;
+
+// ─── Config del mundo ───────────────────────────────────────────────
+var SEG_LEN     = 200;      // largo de un segmento en unidades de mundo
+var ROAD_W      = 2400;     // media anchura de la pista (la fija cada etapa)
+var DRAW_DIST   = 260;      // cuántos segmentos se dibujan hacia adelante
+var CAM_HEIGHT  = 1200;     // altura de la cámara sobre la pista
+var FOV         = 100;
+var CAM_DEPTH   = 1 / Math.tan((FOV / 2) * Math.PI / 180);
+var PLAYER_Z    = CAM_HEIGHT * CAM_DEPTH;   // distancia cámara → rider
+var FOG_DENSITY = 4.2;
+var RUMBLE_LEN  = 3;        // segmentos por franja de color
+
+var MAX_SPEED   = SEG_LEN * 62;             // unidades por segundo
+var ACCEL       = MAX_SPEED / 4.2;
+var DECEL       = -MAX_SPEED / 3.5;
+var OFFROAD_DEC = -MAX_SPEED / 1.6;
+var OFFROAD_MAX = MAX_SPEED / 3.4;
+var CENTRIFUGAL = 0.55;     // cuánto te empuja hacia afuera en las curvas
+var GRAVITY     = 6.2;
+// Gravedad y potencia de salto en unidades de mundo por segundo.
+// Calibradas para que el tiempo de vuelo sea corto y predecible:
+// saltito lento ~0,35 s · botón a fondo ~0,75 s · rampa ~1,15 s
+// (la rampa tiene que dar para una vuelta completa, que toma 0,81 s).
+var GRAV      = 6000;
+var JUMP_V0   = 700,  JUMP_VS  = 1550;   // botón: base + parte por velocidad
+var RAMP_V0   = 2400, RAMP_VS  = 1050;   // rampa: siempre alto
+// A 112 km/h (31,1 m/s) el rider avanza MAX_SPEED unidades por segundo,
+// así que 1 km son ~400.000 unidades de mundo.
+var UNITS_PER_KM = (MAX_SPEED / (112/3.6)) * 1000;
+
+// ════════════════════════════════════════════════════════════════════
+//  ETAPAS
+//  Mismo motor, dos mundos. Cada etapa define su cielo, su cordillera,
+//  su terreno, cómo se genera el trazado y qué hay a los costados.
+//  Son dos contrarreloj: recorrido finito, meta y récord propio.
+// ════════════════════════════════════════════════════════════════════
+var STAGES = {
+  bosque: {
+    id:'bosque',
+    name:'ALTA MONTAÑA',
+    place:'CORDILLERA · BOSQUE DE ALTURA',
+    km: 2.2,
+    sky:[ [0,'#1b5f9e'], [0.36,'#4e9fd0'], [0.70,'#9acfe4'], [1,'#cfe6ef'] ],
+    fog:'#bcd4de',
+    ridges:[
+      { y:2,  amp:150, par:0.26, freq:0.7, col:'#8fa9bf', snow:'#e8f0f6' },
+      { y:12, amp:108, par:0.55, freq:1.2, col:'#3f6350', snow:null },
+      { y:22, amp:80,  par:1.00, freq:2.0, col:'#25482a', snow:null }
+    ],
+    // Tierra de loam clara contra bosque oscuro: es EL contraste de
+    // Whistler y lo que hace que el sendero se lea a 100 por hora.
+    light:{ road:'#bb8f57', grass:'#23421f', rumble:'#9a7040', lane:null, berm:'#7d5c33' },
+    dark :{ road:'#ae8350', grass:'#1d3a1b', rumble:'#8a6238', lane:null, berm:'#6f5130' },
+    roadW: 2400,
+    edge: 1.34,          // hasta la línea de árboles: se puede abrir un poco
+    gen:{ flatChance:0.30, curveSoft:[1.4,3.2], curveHard:[4.0,6.4],
+          crestChance:0.13, dySoft:[-28,-12], dyFirm:[-58,-30], dySteep:[-96,-60] }
+  },
+  valpo: {
+    id:'valpo',
+    name:'CERRO ABAJO',
+    place:'VALPARAÍSO · DESCENSO URBANO',
+    km: 1.6,
+    // Luz de tarde sobre el Pacífico: más cálida y más baja que la cordillera
+    sky:[ [0,'#2b6ea6'], [0.34,'#69a8c6'], [0.66,'#bcd2cf'], [1,'#f0dcb8'] ],
+    fog:'#dcd2bf',
+    ridges:[
+      { y:0,  amp:96,  par:0.22, freq:0.6, col:'#7f93a8', snow:null },   // el mar y la bahía
+      { y:16, amp:132, par:0.55, freq:1.5, col:'#9d8a76', snow:null },   // cerros con casas
+      { y:26, amp:88,  par:1.00, freq:2.4, col:'#7c6a58', snow:null }
+    ],
+    bahia: true, cables: true,
+    // Cemento del pasaje, no asfalto: es el color de la referencia.
+    light:{ road:'#b3aa9c', grass:'#8a7f6d', rumble:'#8e8578', lane:null, berm:'#6f6a62' },
+    dark :{ road:'#a9a092', grass:'#827768', rumble:'#847c70', lane:null, berm:'#645f57' },
+    // Más empinado, más revirado y bastante más angosto: es una quebrada
+    // entre casas, no una avenida. El ancho es la mitad del carácter.
+    roadW: 1250,
+    edge: 1.02,          // las vallas del público: muro, no sugerencia
+    gen:{ flatChance:0.16, curveSoft:[2.0,4.0], curveHard:[5.0,7.8],
+          crestChance:0.09, dySoft:[-40,-18], dyFirm:[-78,-40], dySteep:[-128,-78] }
+  }
+};
+var stageId = 'bosque';
+function S(){ return STAGES[stageId]; }
+function bandColors(band){ var s = S(); return band ? s.dark : s.light; }
+function theme(){ return S(); }
+
+// ─── Utilidades ─────────────────────────────────────────────────────
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+function easeIn(a,b,p){ return a + (b-a)*Math.pow(p,2); }
+function easeOut(a,b,p){ return a + (b-a)*(1-Math.pow(1-p,2)); }
+function easeInOut(a,b,p){ return a + (b-a)*((-Math.cos(p*Math.PI)/2)+0.5); }
+function rnd(a,b){ return a + Math.random()*(b-a); }
+function rndInt(a,b){ return Math.floor(rnd(a,b+1)); }
+function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+function fogAt(d){ return 1 / Math.pow(Math.E, d*d*FOG_DENSITY); }
+
+// ════════════════════════════════════════════════════════════════════
+//  SPRITES PROCEDURALES
+//  Se dibujan una sola vez a canvas chicos al arrancar. Después se
+//  copian con drawImage, que es baratísimo. Así el archivo pesa nada
+//  (cero imágenes) pero corre como si tuviera un atlas de texturas.
+// ════════════════════════════════════════════════════════════════════
+function makeSprite(w, h, draw){
+  var cn = document.createElement('canvas');
+  cn.width = w; cn.height = h;
+  var c = cn.getContext('2d');
+  draw(c, w, h);
+  return { img: cn, w: w, h: h };
+}
+
+var SPR = {};
+var SPRITE_SCALE = 0.30 * (1/120);   // 120px = ancho de referencia
+
+function buildSprites(){
+  // ── Pino de bosque ────────────────────────────────────────────────
+  // Pinos altos: en el bosque de la referencia los árboles se salen del
+  // cuadro. Un árbol bajito rompe la escala y hace parecer maqueta.
+  function pine(dark){
+    return makeSprite(130, 420, function(c,w,h){
+      c.fillStyle = dark ? '#3a2718' : '#4a331f';
+      c.fillRect(w/2-8, h-110, 16, 110);
+      var tiers = [[0.00,1.00],[0.16,0.86],[0.32,0.72],[0.48,0.58],[0.64,0.44],[0.80,0.30]];
+      for(var i=0;i<tiers.length;i++){
+        var ty = h*0.06 + tiers[i][0]*h*0.74;
+        var tw = w*0.52*tiers[i][1];
+        var g = c.createLinearGradient(w/2-tw, 0, w/2+tw, 0);
+        g.addColorStop(0,   dark?'#0c2f14':'#12441c');
+        g.addColorStop(0.42,dark?'#164322':'#1e6b2c');
+        g.addColorStop(1,   dark?'#08240f':'#0d3316');
+        c.fillStyle = g;
+        c.beginPath();
+        c.moveTo(w/2, ty - h*0.16);
+        c.lineTo(w/2 + tw, ty + h*0.09);
+        c.lineTo(w/2 + tw*0.30, ty + h*0.07);
+        c.lineTo(w/2 + tw*0.55, ty + h*0.15);
+        c.lineTo(w/2 - tw*0.55, ty + h*0.15);
+        c.lineTo(w/2 - tw*0.30, ty + h*0.07);
+        c.lineTo(w/2 - tw, ty + h*0.09);
+        c.closePath(); c.fill();
+      }
+    });
+  }
+  SPR.pine  = pine(false);
+  SPR.pineD = pine(true);
+
+  // ── Roca ──────────────────────────────────────────────────────────
+  SPR.rock = makeSprite(120, 84, function(c,w,h){
+    var g = c.createLinearGradient(0,0,0,h);
+    g.addColorStop(0,'#b4b8c0'); g.addColorStop(1,'#6e737c');
+    c.fillStyle = g;
+    c.beginPath();
+    c.moveTo(6,h); c.lineTo(14,h*0.40); c.lineTo(42,h*0.10);
+    c.lineTo(78,h*0.18); c.lineTo(w-10,h*0.52); c.lineTo(w-4,h);
+    c.closePath(); c.fill();
+    c.fillStyle='rgba(255,255,255,.30)';
+    c.beginPath(); c.ellipse(46,h*0.32,16,8,-0.4,0,Math.PI*2); c.fill();
+    c.fillStyle='rgba(0,0,0,.22)';
+    c.beginPath(); c.moveTo(78,h*0.18); c.lineTo(w-10,h*0.52); c.lineTo(w-4,h); c.lineTo(66,h); c.closePath(); c.fill();
+  });
+
+  // ── Helecho — la maleza que bordea todo el trail en la referencia ─
+  SPR.fern = makeSprite(150, 110, function(c,w,h){
+    for (var f=0; f<9; f++){
+      var a  = -Math.PI/2 + (f/8 - 0.5)*2.05;
+      var L  = h*(0.62 + ((f*13)%5)/12);
+      var ox = w/2 + (f-4)*7;
+      c.strokeStyle = f%2 ? '#1e5e26' : '#2a7a32';
+      c.lineWidth = 3.2;
+      c.beginPath();
+      c.moveTo(ox, h);
+      c.quadraticCurveTo(ox + Math.cos(a)*L*0.5, h - L*0.72, ox + Math.cos(a)*L*0.85, h - L);
+      c.stroke();
+      // Foliolos: rayitas cortas a ambos lados de la fronda
+      c.lineWidth = 1.8;
+      for (var t=0.25; t<1; t+=0.16){
+        var px = ox + Math.cos(a)*L*0.85*t, py = h - L*t;
+        c.beginPath(); c.moveTo(px, py); c.lineTo(px - 7 - t*4, py + 3); c.stroke();
+        c.beginPath(); c.moveTo(px, py); c.lineTo(px + 7 + t*4, py + 3); c.stroke();
+      }
+    }
+  });
+
+  // ── Arbusto ───────────────────────────────────────────────────────
+  SPR.bush = makeSprite(110, 62, function(c,w,h){
+    var blobs=[[28,h-16,26,18],[58,h-24,30,22],[86,h-14,22,15]];
+    for(var i=0;i<blobs.length;i++){
+      c.fillStyle = i===1 ? '#2f8a38' : '#26742e';
+      c.beginPath(); c.ellipse(blobs[i][0],blobs[i][1],blobs[i][2],blobs[i][3],0,0,Math.PI*2); c.fill();
+    }
+    c.fillStyle='rgba(255,255,255,.18)';
+    c.beginPath(); c.ellipse(52,h-32,16,8,-.3,0,Math.PI*2); c.fill();
+  });
+
+  // ── Banderín de circuito (poste + tela) ───────────────────────────
+  SPR.flag = makeSprite(90, 190, function(c,w,h){
+    c.fillStyle='#d8dce0'; c.fillRect(10,20,6,h-20);
+    c.fillStyle='#ff7a1a';
+    c.beginPath(); c.moveTo(16,24); c.lineTo(78,42); c.lineTo(16,68); c.closePath(); c.fill();
+    c.fillStyle='rgba(255,255,255,.35)';
+    c.beginPath(); c.moveTo(16,24); c.lineTo(78,42); c.lineTo(46,42); c.closePath(); c.fill();
+  });
+
+  // ── Público (silueta simple, da vida al circuito) ─────────────────
+  SPR.crowd = makeSprite(120, 130, function(c,w,h){
+    var cols=['#e05a2a','#2f6fb0','#f0c020','#d84a6a','#3aa85a','#e8e8e8'];
+    for(var i=0;i<5;i++){
+      var x = 14 + i*22 + rnd(-4,4), bh = h*rnd(0.62,0.88);
+      c.fillStyle = cols[i%cols.length];
+      c.fillRect(x-7, h-bh, 14, bh-14);
+      c.beginPath(); c.arc(x, h-bh+2, 8, 0, Math.PI*2); c.fill();
+      c.fillStyle='rgba(0,0,0,.25)';
+      c.fillRect(x-7, h-16, 14, 16);
+    }
+  });
+
+  // ── Pórtico de auspiciador (esto es lo que se personaliza por marca) ─
+  SPR.arch = makeSprite(560, 260, function(c,w,h){
+    c.fillStyle='#2a3038'; c.fillRect(16,40,26,h-40); c.fillRect(w-42,40,26,h-40);
+    var g=c.createLinearGradient(0,0,0,86);
+    g.addColorStop(0,'#1f6fd0'); g.addColorStop(1,'#124a94');
+    c.fillStyle=g; c.fillRect(8,10,w-16,80);
+    c.fillStyle='#ff7a1a'; c.fillRect(8,86,w-16,8);
+    c.fillStyle='#fff';
+    c.font='bold 46px Impact,Arial Black,sans-serif'; c.textAlign='center';
+    c.fillText('GRAVITAS', w/2, 62);
+  });
+
+  // ── Obstáculos ────────────────────────────────────────────────────
+  SPR.log = makeSprite(200, 70, function(c,w,h){
+    var g=c.createLinearGradient(0,0,0,h);
+    g.addColorStop(0,'#8a5c2e'); g.addColorStop(1,'#5a3a1c');
+    c.fillStyle=g; c.fillRect(8,14,w-16,h-22);
+    c.fillStyle='#a8763e';
+    c.beginPath(); c.ellipse(12,h/2+2,12,h/2-8,0,0,Math.PI*2); c.fill();
+    c.beginPath(); c.ellipse(w-12,h/2+2,12,h/2-8,0,0,Math.PI*2); c.fill();
+    c.strokeStyle='rgba(0,0,0,.3)'; c.lineWidth=2;
+    for(var i=0;i<3;i++){ c.beginPath(); c.ellipse(w-12,h/2+2,7-i*2.4,(h/2-8)*(1-i*0.3),0,0,Math.PI*2); c.stroke(); }
+  });
+
+  SPR.kicker = makeSprite(230, 110, function(c,w,h){
+    var g=c.createLinearGradient(0,h,0,0);
+    g.addColorStop(0,'#6a4a26'); g.addColorStop(1,'#9a7038');
+    c.fillStyle=g;
+    c.beginPath(); c.moveTo(4,h); c.lineTo(w-4,h); c.lineTo(w-4,h*0.52);
+    c.quadraticCurveTo(w*0.5,h*0.02,10,h*0.86); c.closePath(); c.fill();
+    c.fillStyle='#b98c4a';
+    c.beginPath(); c.moveTo(w-4,h*0.52); c.quadraticCurveTo(w*0.5,h*0.02,10,h*0.86);
+    c.lineTo(14,h*0.92); c.quadraticCurveTo(w*0.5,h*0.10,w-4,h*0.60); c.closePath(); c.fill();
+    // Galones apuntando hacia arriba: el idioma de "de aquí despegas".
+    c.fillStyle='#f2f0ec';
+    for(var i=0;i<3;i++){
+      var gy = h*0.80 - i*h*0.20;
+      c.beginPath();
+      c.moveTo(w*0.5, gy - h*0.13);
+      c.lineTo(w*0.5 + w*0.16, gy);
+      c.lineTo(w*0.5 + w*0.09, gy);
+      c.lineTo(w*0.5, gy - h*0.075);
+      c.lineTo(w*0.5 - w*0.09, gy);
+      c.lineTo(w*0.5 - w*0.16, gy);
+      c.closePath(); c.fill();
+    }
+  });
+
+  // Portón: alto, angosto y rayado de peligro. NO se salta, se esquiva.
+  // La forma vertical y el rayado son el idioma universal de "no pases".
+  SPR.gate = makeSprite(150, 300, function(c,w,h){
+    c.fillStyle='#2a2d33'; c.fillRect(w/2-32, 40, 64, h-40);
+    for (var b=0; b<9; b++){
+      c.fillStyle = b%2 ? '#e03a24' : '#f2f0ec';
+      c.save();
+      c.beginPath(); c.rect(w/2-32, 40, 64, h-40); c.clip();
+      c.translate(w/2-40 + b*16, 40);
+      c.beginPath(); c.moveTo(0,0); c.lineTo(14,0); c.lineTo(-14,h-40); c.lineTo(-28,h-40);
+      c.closePath(); c.fill();
+      c.restore();
+    }
+    c.strokeStyle='#1a1c20'; c.lineWidth=5; c.strokeRect(w/2-32, 40, 64, h-40);
+    c.fillStyle='#c8ccd2'; c.fillRect(w/2-4, 0, 8, 44);
+  });
+
+  // ── Puerta de tiempo: la contrarreloj se juega contra el reloj, así
+  //    que el coleccionable son segundos, no monedas.
+  SPR.coin = makeSprite(110, 130, function(c,w,h){
+    var cx2 = w/2, cy2 = h*0.42, R = 34;
+    // Halo
+    var hg = c.createRadialGradient(cx2,cy2,R*0.5,cx2,cy2,R*1.7);
+    hg.addColorStop(0,'rgba(120,240,190,.45)'); hg.addColorStop(1,'rgba(120,240,190,0)');
+    c.fillStyle=hg; c.beginPath(); c.arc(cx2,cy2,R*1.7,0,Math.PI*2); c.fill();
+    // Cuerpo del cronómetro
+    c.fillStyle='#0d4536'; c.beginPath(); c.arc(cx2,cy2,R,0,Math.PI*2); c.fill();
+    c.strokeStyle='#5ef0b4'; c.lineWidth=5; c.stroke();
+    c.strokeStyle='rgba(255,255,255,.55)'; c.lineWidth=2;
+    c.beginPath(); c.arc(cx2,cy2,R-7,0,Math.PI*2); c.stroke();
+    // Corona y agujas
+    c.fillStyle='#5ef0b4'; c.fillRect(cx2-6, cy2-R-9, 12, 9);
+    c.strokeStyle='#eafff6'; c.lineWidth=4; c.lineCap='round';
+    c.beginPath(); c.moveTo(cx2,cy2); c.lineTo(cx2, cy2-R*0.62); c.stroke();
+    c.beginPath(); c.moveTo(cx2,cy2); c.lineTo(cx2+R*0.42, cy2+R*0.20); c.stroke();
+    // Etiqueta
+    c.fillStyle='#5ef0b4'; c.font='bold 26px Impact,Arial Black,sans-serif'; c.textAlign='center';
+    c.fillText('+1s', cx2, h-8);
+  });
+
+  // ── Meta ──────────────────────────────────────────────────────────
+  SPR.finish = makeSprite(620, 300, function(c,w,h){
+    c.fillStyle='#20262e'; c.fillRect(24,60,26,h-60); c.fillRect(w-50,60,26,h-60);
+    c.fillStyle='#101418'; c.fillRect(14,14,w-28,84);
+    // Damero
+    var sq=14;
+    for(var yy=0;yy<2;yy++) for(var xx=0;xx<Math.ceil((w-28)/sq);xx++){
+      c.fillStyle = ((xx+yy)%2) ? '#f4f4f4' : '#15181c';
+      c.fillRect(14+xx*sq, 14+yy*sq, sq, sq);
+    }
+    c.fillStyle='#f4f4f4'; c.font='bold 44px Impact,Arial Black,sans-serif'; c.textAlign='center';
+    c.fillText('META', w/2, 82);
+  });
+
+  // ══ VALPARAÍSO ════════════════════════════════════════════════════
+  // Casas de cerro: volumen simple, techo de zinc, colores fuertes.
+  // El color es lo que hace reconocible a Valparaíso, no el detalle.
+  function casa(body, roof, seed){
+    return makeSprite(210, 250, function(c,w,h){
+      var bh = h*0.68, by = h-bh;
+      // Muro
+      c.fillStyle = body; c.fillRect(18, by, w-36, bh);
+      // Cara sombreada
+      c.fillStyle = 'rgba(0,0,0,.20)'; c.fillRect(w-72, by, 54, bh);
+      // Techo de zinc a dos aguas
+      c.fillStyle = roof;
+      c.beginPath(); c.moveTo(6,by+6); c.lineTo(w/2,by-46); c.lineTo(w-6,by+6); c.closePath(); c.fill();
+      c.fillStyle = 'rgba(0,0,0,.22)';
+      c.beginPath(); c.moveTo(w/2,by-46); c.lineTo(w-6,by+6); c.lineTo(w/2,by+6); c.closePath(); c.fill();
+      // Acanaladura del zinc
+      c.strokeStyle='rgba(0,0,0,.16)'; c.lineWidth=2;
+      for(var k=1;k<9;k++){
+        c.beginPath(); c.moveTo(6+k*((w-12)/9), by+6);
+        c.lineTo(w/2 + (k*((w-12)/9)+6-w/2)*0.12, by-40); c.stroke();
+      }
+      // Ventanas
+      c.fillStyle='#20303c';
+      var wy = by + bh*0.18;
+      c.fillRect(38, wy, 40, 46); c.fillRect(w-118, wy, 40, 46);
+      c.fillStyle='rgba(255,240,200,.55)';
+      c.fillRect(42, wy+4, 14, 18); c.fillRect(w-114, wy+4, 14, 18);
+      c.strokeStyle='rgba(255,255,255,.5)'; c.lineWidth=3;
+      c.strokeRect(38, wy, 40, 46); c.strokeRect(w-118, wy, 40, 46);
+      // Puerta
+      c.fillStyle = roof; c.fillRect(w/2-22, h-64, 44, 64);
+      c.fillStyle='rgba(0,0,0,.25)'; c.fillRect(w/2-22, h-64, 10, 64);
+      // Ropa tendida — el detalle que hace que se sienta habitado
+      if (seed % 2 === 0){
+        c.strokeStyle='rgba(40,40,40,.55)'; c.lineWidth=2;
+        c.beginPath(); c.moveTo(18, by+22); c.quadraticCurveTo(w/2, by+38, w-18, by+22); c.stroke();
+        var cols=['#e8e8e8','#e05a2a','#2f6fb0','#f0c020'];
+        for(var t=0;t<4;t++){
+          c.fillStyle=cols[t];
+          c.fillRect(34+t*40, by+28+t%2*4, 22, 26);
+        }
+      }
+    });
+  }
+  SPR.casas = [
+    casa('#e2604a','#4a6b7a',0), casa('#f0b429','#7a5a4a',1),
+    casa('#3f8fb0','#8a4a3a',2), casa('#7bb661','#4a5a6a',3),
+    casa('#d9556e','#5a6a4a',4), casa('#e8dcc0','#a8503a',5)
+  ];
+
+  // Escalera de cerro (los famosos peldaños de Valparaíso)
+  SPR.escalera = makeSprite(180, 220, function(c,w,h){
+    for (var st=0; st<9; st++){
+      var y = h - st*22, hh = 16;
+      c.fillStyle = st%2 ? '#b8b0a2' : '#cdc5b6';
+      c.fillRect(10+st*4, y-hh, w-20-st*8, hh);
+      c.fillStyle='rgba(0,0,0,.22)';
+      c.fillRect(10+st*4, y-hh+13, w-20-st*8, 4);
+    }
+    c.strokeStyle='#8a8276'; c.lineWidth=4;
+    c.beginPath(); c.moveTo(8,h); c.lineTo(44,0); c.stroke();
+  });
+
+  // Poste del alumbrado
+  SPR.poste = makeSprite(110, 300, function(c,w,h){
+    c.fillStyle='#4a4a50'; c.fillRect(w/2-6, 24, 12, h-24);
+    c.strokeStyle='#4a4a50'; c.lineWidth=8; c.lineCap='round';
+    c.beginPath(); c.moveTo(w/2,26); c.quadraticCurveTo(w/2+34,18,w/2+44,34); c.stroke();
+    c.fillStyle='#f6e6a8';
+    c.beginPath(); c.ellipse(w/2+46,40,14,8,0,0,Math.PI*2); c.fill();
+    c.strokeStyle='rgba(60,60,70,.5)'; c.lineWidth=2;
+    c.beginPath(); c.moveTo(w/2,44); c.quadraticCurveTo(0,58,-20,52); c.stroke();
+  });
+
+  // ── Valla de contención con público detrás ────────────────────────
+  // Es EL elemento del Cerro Abajo: aparece en todos los cuadros de la
+  // referencia, continuo a los dos lados. Va todo junto en un sprite
+  // porque nunca se ve uno sin el otro.
+  function valla(mirror){
+    return makeSprite(180, 200, function(c,w,h){
+      var baseY = h - 8, vh = 74;
+      // Gentío detrás — manchas de color apretadas, sin detalle
+      var tonos = ['#d8d2c8','#3b4654','#8a4a3a','#c8b89e','#2f3a46','#a8564a',
+                   '#e0dcd4','#4a5a68','#7a6a5a','#b8483c','#d0c4b0','#39424e'];
+      for (var p=0; p<16; p++){
+        var px = 6 + (p*11 + (p%3)*5) % (w-14);
+        var ph = vh*(0.85 + ((p*7)%5)/9);
+        c.fillStyle = tonos[p % tonos.length];
+        c.fillRect(px, baseY - vh - ph*0.55, 12, ph);         // torso
+        c.fillStyle = 'rgba(228,196,168,.9)';
+        c.beginPath(); c.arc(px+6, baseY - vh - ph*0.55 - 5, 5, 0, Math.PI*2); c.fill();
+      }
+      // La valla: marco grueso y malla fina
+      c.strokeStyle = '#cfd4d8'; c.lineWidth = 5;
+      c.strokeRect(4, baseY - vh, w - 8, vh);
+      c.strokeStyle = 'rgba(214,220,226,.85)'; c.lineWidth = 1.6;
+      for (var v=1; v<13; v++){
+        var vx = 4 + v*((w-8)/13);
+        c.beginPath(); c.moveTo(vx, baseY - vh); c.lineTo(vx, baseY); c.stroke();
+      }
+      for (var hh=1; hh<4; hh++){
+        var hy = baseY - vh + hh*(vh/4);
+        c.beginPath(); c.moveTo(4, hy); c.lineTo(w-4, hy); c.stroke();
+      }
+      // Patas
+      c.strokeStyle = '#b6bcc2'; c.lineWidth = 4;
+      c.beginPath(); c.moveTo(14, baseY); c.lineTo(8, h); c.stroke();
+      c.beginPath(); c.moveTo(w-14, baseY); c.lineTo(w-8, h); c.stroke();
+      void mirror;
+    });
+  }
+  SPR.valla = valla(false);
+
+  // ── Muro de zinc acanalado, pegado al borde ───────────────────────
+  function zinc(col, dark){
+    return makeSprite(160, 260, function(c,w,h){
+      c.fillStyle = col; c.fillRect(0, 0, w, h);
+      c.strokeStyle = dark; c.lineWidth = 3;
+      for (var k=0; k<w; k+=11){
+        c.beginPath(); c.moveTo(k, 0); c.lineTo(k, h); c.stroke();
+      }
+      c.fillStyle = 'rgba(255,255,255,.12)'; c.fillRect(0, 0, w, 10);
+      c.fillStyle = 'rgba(0,0,0,.18)'; c.fillRect(0, h-16, w, 16);
+      // Rayado / grafiti
+      c.strokeStyle = 'rgba(30,28,32,.5)'; c.lineWidth = 5; c.lineCap='round';
+      c.beginPath();
+      c.moveTo(w*0.2, h*0.42); c.quadraticCurveTo(w*0.5, h*0.22, w*0.78, h*0.46);
+      c.stroke();
+    });
+  }
+  // Colores gastados por el sol y la sal, no de caramelo. En Valparaíso
+  // el color es fuerte pero está viejo: hay que bajarle la saturación.
+  SPR.zincs = [ zinc('#7f9a7c','#5d7359'), zinc('#b07158','#87503c'),
+                zinc('#c6bda8','#9a9284'), zinc('#7b93a6','#5a6d7c'),
+                zinc('#c0a866','#94804a'), zinc('#a8a29a','#807b74') ];
+
+  // Muro con mural — Valparaíso es una ciudad pintada
+  SPR.mural = makeSprite(260, 170, function(c,w,h){
+    c.fillStyle='#d8d2c4'; c.fillRect(0,0,w,h);
+    c.fillStyle='#c8c0b0'; c.fillRect(0,h-16,w,16);
+    var pal=['#e2604a','#f0b429','#3f8fb0','#7bb661','#d9556e'];
+    for(var b=0;b<5;b++){
+      c.fillStyle=pal[b];
+      c.beginPath();
+      c.moveTo(18+b*46, h-24);
+      c.quadraticCurveTo(30+b*46, 22+((b*37)%40), 52+b*46, h-24);
+      c.closePath(); c.fill();
+    }
+    c.fillStyle='rgba(255,255,255,.35)';
+    c.beginPath(); c.arc(w*0.72, h*0.30, 22, 0, Math.PI*2); c.fill();
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  LA PISTA
+//  Se genera infinita: creamos segmentos por delante y botamos los de
+//  atrás. Así el descenso nunca termina — no es un circuito que da la
+//  vuelta y tiene que volver a subir.
+// ════════════════════════════════════════════════════════════════════
+var segs = [];        // ventana deslizante de segmentos
+var raceSegs = 0;     // largo de la etapa en segmentos (la meta va aquí)
+var segBase = 0;      // índice absoluto de segs[0]
+var genIdx  = 0;      // próximo índice a generar
+var genY    = 0;      // altura acumulada del generador
+
+// estado del generador de secciones
+var secLeft = 0, secLen = 0;
+var curveFrom = 0, curveTo = 0;
+var dyFrom = 0, dyTo = 0;
+var sinceArch = 0, sinceGap = 0;
+
+function segAt(i){ return segs[i - segBase]; }
+
+// ── Decorado: cordillera ────────────────────────────────────────────
+// El bosque se abre y se cierra en oleadas. Un muro parejo de pinos se
+// lee como papel tapiz; lo que da profundidad es la variación.
+function decorBosque(s, i){
+  // Maleza pegada al canto del sendero, casi en cada segmento. Es lo que
+  // hace que el trail se sienta encajonado en el bosque y no un camino.
+  if (Math.random() < 0.5)
+    s.sprites.push({ src: Math.random()<0.72 ? SPR.fern : SPR.bush,
+                     off: (Math.random()<0.5?-1:1)*rnd(1.42, 1.66) });
+
+  var density = 0.55 + Math.sin(i*0.011)*0.35;
+  if (Math.random() < density){
+    var far = Math.random() < 0.45;
+    var off = far ? rnd(1.55, 3.6) : rnd(1.22, 1.60);
+    var sp  = Math.random() < 0.74 ? (far ? SPR.pineD : SPR.pine) : SPR.rock;
+    s.sprites.push({ src: sp, off: (Math.random()<0.5?-1:1)*off });
+  }
+  // Nada de banderines ni público de colores: en la montaña estorban.
+  // El único elemento construido son los troncos y la madera del trail.
+
+  // Raíces y pedreros sobre el propio sendero
+  var d = Math.random();
+  if (d < 0.10)      s.decal = 'root';
+  else if (d < 0.17) s.decal = 'rocks';
+  s.decalSeed = i * 0.7;
+}
+
+// ── Decorado: Valparaíso ────────────────────────────────────────────
+// Las casas van pegadas al borde: es una quebrada entre construcciones,
+// no un camino abierto. Eso es lo que hace claustrofóbico al Cerro Abajo.
+function decorValpo(s, i){
+  // ── Vallas con público, continuas a los dos lados ─────────────────
+  // Es el elemento que aparece en TODOS los cuadros de la referencia.
+  // Sin esto no se lee como una carrera urbana con gente encima.
+  if (i % 2 === 0){
+    s.sprites.push({ src: SPR.valla, off: -1.06 });
+    s.sprites.push({ src: SPR.valla, off:  1.06 });
+  }
+
+  // ── Muros de zinc justo detrás de la valla: la quebrada es angosta
+  if (Math.random() < 0.55)
+    s.sprites.push({ src: pick(SPR.zincs), off: (Math.random()<0.5?-1:1)*rnd(1.30, 1.55) });
+
+  // Casas del cerro, escalonadas hacia arriba
+  if (Math.random() < 0.45)
+    s.sprites.push({ src: pick(SPR.casas), off: (Math.random()<0.5?-1:1)*rnd(1.75, 3.2) });
+  if (i % 3 === 0 && Math.random() < 0.5)
+    s.sprites.push({ src: pick(SPR.casas), off: (Math.random()<0.5?-1:1)*rnd(3.4, 5.0) });
+
+  if (i % 23 === 0) s.sprites.push({ src: SPR.escalera, off: (Math.random()<0.5?-1:1)*rnd(1.60,1.95) });
+  if (i % 12 === 0) s.sprites.push({ src: SPR.poste, off: (i%24===0?-1:1)*1.22 });
+  if (i % 31 === 0) s.sprites.push({ src: SPR.mural, off: (Math.random()<0.5?-1:1)*rnd(1.34,1.50) });
+
+  // Tramos de escalera sobre el propio pavimento
+  if (i % 40 < 7) s.decal = 'stairs';
+  s.decalSeed = i * 0.7;
+}
+
+function newSection(){
+  curveFrom = curveTo;
+  dyFrom    = dyTo;
+  secLen    = rndInt(55, 150);
+  secLeft   = secLen;
+
+  var g = S().gen;
+
+  // Curvatura: rectas, curvas suaves y algunas cerradas
+  var r = Math.random();
+  var mag = r < g.flatChance ? 0
+          : (r < g.flatChance + 0.42 ? rnd(g.curveSoft[0], g.curveSoft[1])
+                                     : rnd(g.curveHard[0], g.curveHard[1]));
+  curveTo = mag * (Math.random() < 0.5 ? -1 : 1);
+
+  // Pendiente: SIEMPRE bajando salvo alguna loma corta que te lanza
+  var q = Math.random();
+  if (q < g.crestChance)     dyTo = rnd(18, 34);
+  else if (q < 0.34)         dyTo = rnd(g.dySoft[0],  g.dySoft[1]);
+  else if (q < 0.78)         dyTo = rnd(g.dyFirm[0],  g.dyFirm[1]);
+  else                       dyTo = rnd(g.dySteep[0], g.dySteep[1]);
+}
+
+function genSegment(){
+  var curve, dy;
+  if (genIdx >= raceSegs){
+    // Zona de frenado después de la meta: recta y casi plana. Existe solo
+    // para que la cámara tenga qué dibujar al cruzar.
+    curve = 0; dy = -6;
+  } else {
+    if (secLeft <= 0) newSection();
+    var p = 1 - (secLeft / secLen);
+    curve = easeInOut(curveFrom, curveTo, p);
+    dy    = easeInOut(dyFrom, dyTo, p);
+    secLeft--;
+  }
+
+  var y0 = genY;
+  genY += dy;
+  var i = genIdx++;
+  var band = Math.floor(i / RUMBLE_LEN) % 2;
+
+  var s = {
+    index: i,
+    p1: { world:{ y:y0, z: i*SEG_LEN },     camera:{}, screen:{} },
+    p2: { world:{ y:genY, z:(i+1)*SEG_LEN }, camera:{}, screen:{} },
+    curve: curve,
+    band: band,
+    sprites: [],
+    items: [],
+    clip: 0, fog: 1
+  };
+
+  if (i < raceSegs) decorate(s, dy);
+  else if (i === raceSegs) s.sprites.push({ src: SPR.finish, off: 0, arch: true });
+  segs.push(s);
+}
+
+// Vegetación, casas, público, obstáculos y puertas de tiempo
+function decorate(s, dy){
+  var i = s.index;
+  if (i < 40) return;   // arranque limpio
+
+  if (stageId === 'valpo') decorValpo(s, i);
+  else                     decorBosque(s, i);
+
+  // Pórtico de marca de vez en cuando
+  sinceArch++;
+  if (sinceArch > 240 && Math.random() < 0.03){
+    sinceArch = 0;
+    s.sprites.push({ src: SPR.arch, off: 0, arch: true });
+  }
+
+  // ── Obstáculos y monedas ──────────────────────────────────────────
+  sinceGap++;
+  if (sinceGap < 26) return;
+
+  var r = Math.random();
+  if (r < 0.035){
+    // Rampa: siempre al centro-ish para que sea invitación, no castigo
+    sinceGap = 0;
+    s.items.push({ type:'kicker', src:SPR.kicker, off: rnd(-0.45,0.45), w:0.30 });
+  } else if (r < 0.075){
+    sinceGap = 0;
+    s.items.push({ type:'log', src:SPR.log, off: rnd(-0.62,0.62), w:0.26 });
+  } else if (r < 0.10){
+    sinceGap = 0;
+    s.items.push({ type:'gate', src:SPR.gate, off: rnd(-0.70,0.70), w:0.16 });
+  } else if (r < 0.14){
+    // Puertas de tiempo: premian leer bien la línea de la curva
+    sinceGap = 20;
+    var lane = clamp(-s.curve*0.13, -0.7, 0.7);
+    s.items.push({ type:'coin', src:SPR.coin, off: lane, w:0.16 });
+  }
+}
+
+// Reinicio completo del generador. Sin esto, al empezar una partida
+// nueva la posición vuelve a cero pero los segmentos de esa zona ya
+// fueron descartados de memoria → el juego se cae.
+function resetTrack(){
+  ROAD_W   = S().roadW;
+  raceSegs = Math.round(S().km * UNITS_PER_KM / SEG_LEN);
+  segs.length = 0;
+  segBase = 0; genIdx = 0; genY = 0;
+  secLeft = 0; secLen = 0;
+  curveFrom = 0; curveTo = 0; dyFrom = 0; dyTo = 0;
+  sinceArch = 0; sinceGap = 0;
+  ensureTrack(DRAW_DIST + 120);
+}
+
+function ensureTrack(uptoIndex){
+  while (genIdx <= uptoIndex) genSegment();
+  // Botar lo que quedó muy atrás para no crecer sin límite
+  while (segs.length > DRAW_DIST + 420){ segs.shift(); segBase++; }
+}
+
+function findSegment(z){ return segAt(Math.floor(z / SEG_LEN)); }
+
+// ════════════════════════════════════════════════════════════════════
+//  ESTADO DEL JUGADOR
+// ════════════════════════════════════════════════════════════════════
+var phase = 'menu';
+var position = 0, speed = 0;
+var playerX = 0;            // -1..1 relativo al ancho de la pista
+var camX = 0;               // cámara persiguiendo con retardo
+var airY = 0, airH = 0, airV = 0, airborne = false, airTime = 0;
+// Duración total del vuelo, calculada al despegar. Con ella se decide
+// si el rider alcanza a completar una vuelta o no.
+var airTotal = 0, noAirHint = 0;
+var TRICK_MIN_AIR = 0.85;   // una vuelta toma 0,81 s
+var lean = 0, steerVis = 0;
+var shake = 0, flash = 0, pitchPx = 0, camPitch = 0;
+var lives = 3, invuln = 0, points = 0, coins = 0, best = 0, bestPts = 0;
+var raceTime = 0, penalty = 0, finished = false, splitFlash = 0, scrape = 0;
+var bestTime = { bosque: 0, valpo: 0 };
+var turbo = 0, boost = 0;
+var flipAng = 0, flipDir = 0, comboT = 0, combo = 0;
+// Los tres trucos: backflip (giro hacia atrás), 360 (giro sobre el eje
+// vertical) y whip (la bici cruzada de lado, hay que enderezarla antes
+// de tocar suelo). Se pueden encadenar en un mismo vuelo.
+var spinAng = 0, spinDir = 0, whipPeak = 0;
+var trick = null;
+var parts = [];
+var elapsed = 0;
+var lastLandY = 0;
+
+var keys = {}, touchDir = 0, touchJump = false;
+
+function loadStore(){
+  try {
+    bestPts = +(localStorage.getItem('descenso.bestPts')||0);
+    bestTime.bosque = +(localStorage.getItem('descenso.t.bosque')||0);
+    bestTime.valpo  = +(localStorage.getItem('descenso.t.valpo') ||0);
+  } catch(e){}
+}
+function saveTime(id, t){
+  bestTime[id] = t;
+  try { localStorage.setItem('descenso.t.'+id, t); } catch(e){}
+}
+function fmtTime(t){
+  if (!t) return '--:--.--';
+  var m = Math.floor(t/60), s = t - m*60;
+  return m + ':' + (s<10?'0':'') + s.toFixed(2);
+}
+loadStore();
+
+function resetRun(){
+  resetTrack();
+  position = 0; speed = MAX_SPEED*0.35; playerX = 0; camX = 0;
+  airY = 0; airH = 0; airV = 0; airborne = false; airTime = 0;
+  lean = 0; steerVis = 0; shake = 0; flash = 0; pitchPx = 0; camPitch = 0;
+  lives = 3; invuln = 0; points = 0; coins = 0;
+  turbo = 0; boost = 0; flipAng = 0; flipDir = 0; combo = 0; comboT = 0;
+  spinAng = 0; spinDir = 0; whipPeak = 0;
+  trick = null; parts.length = 0; elapsed = 0;
+  raceTime = 0; penalty = 0; finished = false; splitFlash = 0; scrape = 0;
+  phase = 'playing';
+}
+
+// Cruzar la meta. El tiempo final es el del reloj más los castigos por
+// caída, menos los segundos que rescataste en las puertas de tiempo.
+function finishRace(){
+  finished = true;
+  var t = Math.max(0, raceTime + penalty - coins);
+  finalTime = t;
+  improved = (!bestTime[stageId] || t < bestTime[stageId]);
+  if (improved) saveTime(stageId, t);
+  if (points > bestPts){ bestPts = Math.floor(points); try{localStorage.setItem('descenso.bestPts',bestPts);}catch(e){} }
+  phase = 'finish';
+  sfx.boost();
+}
+var finalTime = 0, improved = false;
+
+// ════════════════════════════════════════════════════════════════════
+//  FÍSICA — paso fijo de 1/60 s
+//  Esto es lo que arregla que el juego corra al doble en pantallas de
+//  120 Hz: la simulación siempre avanza igual, dibuje a los Hz que sea.
+// ════════════════════════════════════════════════════════════════════
+function update(dt){
+  elapsed += dt;
+  raceTime += dt;
+  ensureTrack(Math.floor(position/SEG_LEN) + DRAW_DIST + 60);
+
+  // ¿Cruzó la meta?
+  if (!finished && position + PLAYER_Z >= raceSegs * SEG_LEN){ finishRace(); return; }
+
+  var seg = findSegment(position + PLAYER_Z);
+  var segNow = findSegment(position);
+  var speedPct = speed / MAX_SPEED;
+
+  // ── Dirección ─────────────────────────────────────────────────────
+  var steer = 0;
+  if (keys.left)  steer -= 1;
+  if (keys.right) steer += 1;
+  if (touchDir)   steer = touchDir;
+  steerVis = lerp(steerVis, steer, 1 - Math.pow(0.001, dt));
+
+  var dx = dt * 2.4 * speedPct;
+  playerX += steer * dx;
+  // Fuerza centrífuga: en las curvas te tira hacia afuera. Es lo que
+  // obliga a corregir y lo que genera la tensión del descenso.
+  if (!airborne) playerX -= dt * speedPct * speedPct * seg.curve * CENTRIFUGAL;
+  playerX = clamp(playerX, -1.9, 1.9);
+
+  // ── Aceleración ───────────────────────────────────────────────────
+  var target = MAX_SPEED * (boost > 0 ? 1.34 : 1);
+  if (keys.brake) speed += DECEL * dt;
+  else if (speed < target) speed += ACCEL * dt * (1 - speed/target*0.55);
+  else speed = lerp(speed, target, 1 - Math.pow(0.02, dt));
+
+  var offRoad = Math.abs(playerX) > 1;
+  if (offRoad && !airborne){
+    if (speed > OFFROAD_MAX) speed += OFFROAD_DEC * dt;
+    shake = Math.max(shake, 2.2 * speedPct);
+    if (Math.random() < 0.7) spawnDust(1);
+  }
+
+  // ── El borde es un muro, no una sugerencia ────────────────────────
+  // En Valparaíso son las vallas del público; en la montaña, la línea
+  // de árboles. En los dos casos no se puede pasar al otro lado.
+  var edge = S().edge;
+  if (Math.abs(playerX) > edge){
+    var lado = playerX > 0 ? 1 : -1;
+    playerX = lado * edge;
+    speed *= (1 - 1.9*dt);                 // raspar la valla cuesta caro
+    shake  = Math.max(shake, 6 * speedPct);
+    scrape = Math.min(1, scrape + dt*4);
+    if (Math.random() < 0.55) spawnDust(2);
+  } else {
+    scrape = Math.max(0, scrape - dt*3);
+  }
+  speed = clamp(speed, 0, MAX_SPEED*1.45);
+  if (boost > 0) boost -= dt;
+
+  position += speed * dt;
+
+  // ── Vuelo y aterrizaje ────────────────────────────────────────────
+  // Clave: la gravedad actúa sobre airH, la altura RESPECTO DEL SUELO,
+  // no sobre la posición absoluta. Antes era balística en coordenadas
+  // de mundo y en bajada el terreno se arrancaba hacia abajo, así que
+  // el rider seguía "cayendo" sin tocar nada: 2,75 s de vuelo en vez
+  // de 1,1. Con el suelo como marco de referencia el salto dura lo
+  // mismo en llano que en la bajada más empinada.
+  var roadY = segY(position + PLAYER_Z);
+
+  if (airborne){
+    airTime += dt;
+    // Cae más rápido de lo que sube: hace el salto nítido en vez de flotante
+    airV -= GRAV * (airV < 0 ? 1.35 : 1) * dt;
+    airH += airV * dt;
+    airY  = roadY + airH;
+    // Una vuelta completa en ~0,8 s: lo que dura un salto de rampa.
+    if (flipDir !== 0) flipAng += flipDir * 7.8 * dt;
+    if (spinDir !== 0) spinAng += spinDir * 7.4 * dt;
+    whipPeak = Math.max(whipPeak, Math.abs(rig.whip));
+    if (airH <= 0){ airH = 0; land(roadY); }
+  } else {
+    // Solo hay DOS formas de volar: una rampa o el botón de salto.
+    airH = 0;
+    airY = roadY;
+    lastLandY = roadY;
+    if (Math.random() < speedPct * 0.8) spawnDust(1);
+  }
+
+  // ── Saltar ────────────────────────────────────────────────────────
+  if ((keys.jump || touchJump) && !airborne){
+    // Depende fuerte de la velocidad: casi parado es un saltito, a
+    // fondo es un salto de verdad. Así el botón se siente distinto
+    // de una rampa, que siempre lanza alto.
+    airborne = true; airH = 0; airV = JUMP_V0 + JUMP_VS*speedPct; airTime = 0;
+    airTotal = 1.72 * airV / GRAV;      // subida + bajada (la caída es más rápida)
+    sfx.jump();
+  }
+  touchJump = false;
+
+  // ── Iniciar truco: ↑ dispara el 360, ↓ el backflip ────────────────
+  // Una vez iniciado no cambia de sentido: hay que comprometerse.
+  // Y solo se permite si queda vuelo suficiente para completar la vuelta.
+  // Si no, apretar ↓ en un saltito sería caída garantizada: una trampa.
+  if (airborne && airTime > 0.06){
+    var alcanza = airTotal >= TRICK_MIN_AIR;
+    if (keys.up || keys.down){
+      if (alcanza){
+        if (spinDir === 0 && keys.up)   spinDir = 1;
+        if (flipDir === 0 && keys.down) flipDir = -1;
+      } else if (spinDir === 0 && flipDir === 0){
+        noAirHint = 0.9;      // "te falta altura, busca una rampa"
+      }
+    }
+  }
+  if (noAirHint > 0) noAirHint -= dt;
+
+  // ── Inclinación visual ────────────────────────────────────────────
+  var targetLean = steerVis * 0.34 + seg.curve * speedPct * 0.055;
+  lean = lerp(lean, targetLean, 1 - Math.pow(0.004, dt));
+
+  // Cámara con retardo → el rider se despega del centro al doblar
+  camX = lerp(camX, playerX, 1 - Math.pow(0.0015, dt));
+
+  // Pendiente de los próximos ~24 segmentos. Positiva = vas bajando.
+  var slope = (segY(position + PLAYER_Z) - segY(position + PLAYER_Z + SEG_LEN*24)) / 24;
+  var targetPitch = clamp(slope * 0.62, -30, 78);
+  camPitch = lerp(camPitch, targetPitch, 1 - Math.pow(0.02, dt));
+  pitchPx = camPitch;
+
+  // ── Colisiones ────────────────────────────────────────────────────
+  collide(segNow);
+
+  if (invuln > 0) invuln -= dt;
+  if (shake > 0)  shake = Math.max(0, shake - dt*18);
+  if (flash > 0)  flash = Math.max(0, flash - dt*3.4);
+  if (comboT > 0){ comboT -= dt; if (comboT <= 0) combo = 0; }
+  if (trick){ trick.t -= dt; if (trick.t <= 0) trick = null; }
+
+  points += speed * dt * 0.0016 * (1 + combo*0.25);
+  if (boost > 0) points += dt * 40;
+
+  updateParts(dt);
+}
+
+// Altura de la pista en una posición arbitraria (interpolada)
+function segY(z){
+  var s = findSegment(z);
+  if (!s) return 0;
+  var p = (z % SEG_LEN) / SEG_LEN;
+  return lerp(s.p1.world.y, s.p2.world.y, p);
+}
+
+function land(roadY){
+  airborne = false;
+  airY = roadY;
+  var hard = Math.min(1, airTime / 1.1);
+  rig.susR = 1.1 + hard*0.9;      // la suspensión se come el golpe
+  rig.susF = 0.9 + hard*0.7;
+  shake = Math.max(shake, 5 + hard*10);
+  sfx.land(hard);
+  spawnDust(6 + hard*14);
+
+  // ── Evaluar el vuelo ──────────────────────────────────────────────
+  var TAU = Math.PI*2;
+  var names = [], pts = 0, fail = null;
+
+  // Backflip: hay que completar la vuelta o caes de cabeza
+  if (Math.abs(flipAng) > 0.4){
+    if (Math.abs(flipAng) >= TAU*0.90){
+      var fr = Math.floor(Math.abs(flipAng)/TAU);
+      names.push(fr >= 2 ? 'DOBLE BACKFLIP' : 'BACKFLIP');
+      pts += 600*fr;
+    } else if (Math.abs(flipAng) > 1.25) fail = '¡DE CABEZA!';
+  }
+  // 360: igual, a medio girar aterrizas cruzado
+  if (Math.abs(spinAng) > 0.4){
+    if (Math.abs(spinAng) >= TAU*0.90){
+      var sr = Math.floor(Math.abs(spinAng)/TAU);
+      names.push(sr >= 2 ? '720' : '360');
+      pts += 520*sr;
+    } else if (Math.abs(spinAng) > 1.25 && !fail) fail = '¡ATERRIZÓ CRUZADO!';
+  }
+  // Whip: la gracia es enderezar la bici antes de tocar suelo.
+  // Si no alcanza a enderezar NO se cae — simplemente no puntúa. En el
+  // aire ← → también sirve para acomodar la línea, y castigar eso con
+  // una caída sería injusto: el jugador no entendería por qué se cayó.
+  if (whipPeak > 0.50 && Math.abs(rig.whip) < 0.38){
+    names.push('WHIP'); pts += 380;
+  }
+
+  if (fail && invuln <= 0){
+    crash(fail);
+  } else if (names.length){
+    // Encadenar trucos en un mismo vuelo multiplica
+    var combo2 = names.length >= 2 ? 1 + (names.length-1)*0.6 : 1;
+    award(names.join(' + '), Math.round(pts*combo2));
+  } else if (airTime > 0.75){
+    award('BIG AIR', Math.round(airTime*420));
+  }
+
+  flipAng = 0; flipDir = 0; spinAng = 0; spinDir = 0; whipPeak = 0;
+}
+
+function award(label, pts){
+  combo++; comboT = 3.2;
+  var total = Math.round(pts * (1 + (combo-1)*0.35));
+  points += total;
+  turbo = Math.min(100, turbo + 26);
+  trick = { label: label, pts: total, combo: combo, t: 1.5 };
+  flash = Math.max(flash, 0.35);
+  sfx.trick(combo);
+  if (turbo >= 100){ turbo = 0; boost = 2.6; flash = 0.8; shake = 8; sfx.boost(); }
+}
+
+function crash(reason){
+  if (invuln > 0) return;
+  lives--;
+  invuln = 2.0;
+  speed *= 0.32;
+  shake = 16; flash = 0.6;
+  combo = 0; turbo = Math.max(0, turbo - 40);
+  trick = { label: reason || '¡CAÍDA!', pts: 0, t: 1.4 };
+  penalty += 2;               // cada caída cuesta 2 segundos en la general
+  spawnDust(26);
+  sfx.crash();
+  if (lives <= 0){
+    if (points > bestPts){ bestPts = Math.floor(points); try{localStorage.setItem('descenso.bestPts',bestPts);}catch(e){} }
+    setTimeout(function(){ if (phase === 'playing') phase = 'gameover'; }, 700);
+  }
+}
+
+// Altura de mundo que hay que superar para pasar por encima de cada
+// obstáculo. El portón es prácticamente insalvable a propósito: es el
+// que enseña a esquivar.
+var OBST = {
+  log : { clear: 220,    aviso:'¡TRONCO!' },
+  gate: { clear: 100000, aviso:'¡PORTÓN!' }
+};
+
+function collide(segNow){
+  // Revisar los pocos segmentos alrededor del rider
+  var base = Math.floor((position + PLAYER_Z) / SEG_LEN);
+  for (var n = -1; n <= 2; n++){
+    var s = segAt(base + n);
+    if (!s || !s.items.length) continue;
+    for (var k = s.items.length-1; k >= 0; k--){
+      var it = s.items[k];
+      if (it.taken) continue;
+      var d = Math.abs(playerX - it.off);
+      if (d > it.w + 0.10) continue;
+
+      if (it.type === 'coin'){
+        if (airborne && airY - segY(position+PLAYER_Z) > 900) continue;
+        it.taken = true; coins++; points += 60;
+        turbo = Math.min(100, turbo + 5);
+        splitFlash = 0.9;
+        sfx.coin();
+        if (turbo >= 100){ turbo = 0; boost = 2.6; flash = 0.8; sfx.boost(); }
+      } else if (it.type === 'kicker'){
+        if (!airborne){
+          it.taken = true;
+          airborne = true; airH = 0; airTime = 0;
+          airV = RAMP_V0 + RAMP_VS*(speed/MAX_SPEED);
+          airTotal = 1.72 * airV / GRAV;
+          sfx.kicker();
+        }
+      } else {
+        // Vocabulario claro de obstáculos:
+        //   tronco  → bajo y ancho, SE SALTA
+        //   portón  → alto y angosto, NO se salta, hay que esquivarlo
+        var h = airY - segY(position + PLAYER_Z);
+        if (h > OBST[it.type].clear) continue;
+        it.taken = true;
+        crash(OBST[it.type].aviso);
+      }
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  PARTÍCULAS (polvo)
+// ════════════════════════════════════════════════════════════════════
+function riderSX(){ return W/2 + (playerX - camX) * 210; }
+function spawnDust(n){
+  var sp = speed/MAX_SPEED;
+  var ox = riderSX();
+  for (var i=0;i<n;i++){
+    parts.push({
+      x: ox + rnd(-20,20),
+      y: H*0.895 + rnd(-5,5),
+      vx: rnd(-80,80) - steerVis*150,
+      vy: rnd(-52,-10),
+      life: rnd(0.30,0.7), max: 0.7,
+      r: rnd(2.5,7) * (0.5 + sp*0.7)
+    });
+  }
+  if (parts.length > 260) parts.splice(0, parts.length-260);
+}
+function updateParts(dt){
+  for (var i=parts.length-1;i>=0;i--){
+    var p = parts[i];
+    p.life -= dt;
+    if (p.life <= 0){ parts.splice(i,1); continue; }
+    p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 120*dt; p.r += 14*dt;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  AUDIO
+// ════════════════════════════════════════════════════════════════════
+var AC = null, muted = false, windGain = null, windSrc = null;
+function initAudio(){
+  if (AC) return;
+  AC = new (window.AudioContext||window.webkitAudioContext)();
+  // Viento: ruido filtrado cuya frecuencia sube con la velocidad.
+  // Es el truco más barato que existe para "sentir" la velocidad.
+  var len = AC.sampleRate*2, buf = AC.createBuffer(1,len,AC.sampleRate), d = buf.getChannelData(0);
+  for (var i=0;i<len;i++) d[i] = Math.random()*2-1;
+  windSrc = AC.createBufferSource(); windSrc.buffer = buf; windSrc.loop = true;
+  var f = AC.createBiquadFilter(); f.type='bandpass'; f.frequency.value=420; f.Q.value=0.7;
+  windGain = AC.createGain(); windGain.gain.value = 0;
+  windSrc.connect(f); f.connect(windGain); windGain.connect(AC.destination);
+  windSrc.start();
+  windSrc._filter = f;
+}
+function beep(freq, dur, vol, type, sweep, delay){
+  if (!AC || muted) return;
+  var t0 = AC.currentTime + (delay||0);
+  var o = AC.createOscillator(), g = AC.createGain();
+  o.type = type||'square'; o.frequency.setValueAtTime(freq, t0);
+  if (sweep) o.frequency.exponentialRampToValueAtTime(sweep, t0+dur*0.85);
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.0008, t0+dur);
+  o.connect(g); g.connect(AC.destination); o.start(t0); o.stop(t0+dur+0.02);
+}
+function burst(dur, vol, freq){
+  if (!AC || muted) return;
+  var n = Math.floor(AC.sampleRate*dur), b = AC.createBuffer(1,n,AC.sampleRate), d = b.getChannelData(0);
+  for (var i=0;i<n;i++) d[i] = (Math.random()*2-1)*Math.pow(1-i/n,2);
+  var s = AC.createBufferSource(), g = AC.createGain(), f = AC.createBiquadFilter();
+  f.type='lowpass'; f.frequency.value = freq||900;
+  s.buffer=b; s.connect(f); f.connect(g); g.connect(AC.destination);
+  g.gain.value = vol; s.start();
+}
+var sfx = {
+  jump:  function(){ beep(300,0.16,0.10,'sine',620); },
+  land:  function(h){ burst(0.14+h*0.1, 0.22+h*0.2, 500); beep(120,0.10,0.09,'sine'); },
+  kicker:function(){ beep(220,0.06,0.11,'sine',900); beep(560,0.20,0.10,'sine',1200,0.06); },
+  coin:  function(){ beep(1180,0.05,0.07,'square',1560); beep(1560,0.08,0.06,'square',1900,0.05); },
+  trick: function(c){ var b=560+c*90; beep(b,0.07,0.10,'square',b*1.5); beep(b*1.5,0.12,0.09,'square',b*2,0.07); },
+  crash: function(){ burst(0.42,0.5,700); beep(180,0.45,0.13,'sawtooth',55); },
+  boost: function(){ beep(120,0.55,0.16,'sawtooth',760); burst(0.3,0.25,1800); }
+};
+function updateWind(){
+  if (!windGain || !AC) return;
+  var sp = speed/MAX_SPEED;
+  var v = (phase==='playing' && !muted) ? Math.pow(sp,2)*0.16 : 0;
+  windGain.gain.setTargetAtTime(v, AC.currentTime, 0.12);
+  windSrc._filter.frequency.setTargetAtTime(320 + sp*1100, AC.currentTime, 0.12);
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  PROYECCIÓN Y RENDER DE LA PISTA
+// ════════════════════════════════════════════════════════════════════
+// El horizonte real de esta proyección está siempre en H/2. Al bajar, la
+// pista cae POR DEBAJO de esa línea sola — ese es el efecto de descenso.
+// camPitch inclina la cámara hacia abajo para exagerarlo: sube el
+// horizonte y deja ver más pista, como cuando miras cerro abajo.
+function horizonY(){ return H/2 - camPitch; }
+
+function project(p, cx, cy, cz){
+  p.camera.x = (p.world.x||0) - cx;
+  p.camera.y = (p.world.y||0) - cy;
+  p.camera.z = (p.world.z||0) - cz;
+  p.screen.scale = CAM_DEPTH / p.camera.z;
+  p.screen.x = (W/2)        + (p.screen.scale * p.camera.x * W/2);
+  p.screen.y = horizonY()   - (p.screen.scale * p.camera.y * H/2);
+  p.screen.w =                (p.screen.scale * ROAD_W    * W/2);
+}
+
+function poly(x1,y1,x2,y2,x3,y3,x4,y4,color){
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.lineTo(x3,y3); ctx.lineTo(x4,y4);
+  ctx.closePath(); ctx.fill();
+}
+function fogFill(y, h, f){
+  if (f >= 1) return;
+  ctx.globalAlpha = 1 - f;
+  ctx.fillStyle = theme().fog;
+  ctx.fillRect(0, y, W, h);
+  ctx.globalAlpha = 1;
+}
+
+var skyGrad = null, skyGradFor = null;
+function drawSky(){
+  if (!skyGrad || skyGradFor !== stageId){
+    skyGrad = ctx.createLinearGradient(0,0,0,H);
+    S().sky.forEach(function(st){ skyGrad.addColorStop(st[0], st[1]); });
+    skyGradFor = stageId;
+  }
+  ctx.fillStyle = skyGrad; ctx.fillRect(0,0,W,H);
+}
+
+function drawBackdrop(){
+  var hz = horizonY();
+  var par = -camX*60 - (position*0.00016) % W;
+
+  // Sol
+  var sx = W*0.74 + camX*22, sy = hz - 118;
+  var sg = ctx.createRadialGradient(sx,sy,0,sx,sy,120);
+  sg.addColorStop(0,'rgba(255,250,210,.95)');
+  sg.addColorStop(0.28,'rgba(255,226,130,.55)');
+  sg.addColorStop(1,'rgba(255,210,90,0)');
+  ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(sx,sy,120,0,Math.PI*2); ctx.fill();
+
+  // Cordillera en 3 capas con parallax distinto. Se apoyan justo en el
+  // horizonte: cuando la pista cae por debajo, la bajada se lee.
+  var R = S().ridges;
+  for (var i=0;i<R.length;i++)
+    drawRidge(hz + R[i].y, par*R[i].par, R[i].amp, R[i].col, R[i].freq, R[i].snow);
+
+  if (S().bahia)  drawBahia(hz, par);
+  if (S().cables) drawCables(hz);
+}
+function ridgeY(x, off, amp, baseY, freq){
+  var t = (x + off) * 0.004 * freq;
+  return baseY - amp*0.55 - Math.sin(t)*amp*0.34 - Math.sin(t*2.3)*amp*0.16;
+}
+function drawRidge(baseY, off, amp, color, freq, snow){
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(-40, H);
+  for (var x=-40; x<=W+40; x+=16) ctx.lineTo(x, ridgeY(x, off, amp, baseY, freq));
+  // Se rellena hasta el fondo de la pantalla: el pasto lo tapa igual, y
+  // así nunca aparece una franja de cielo entre el cerro y la pista.
+  ctx.lineTo(W+40, H);
+  ctx.closePath(); ctx.fill();
+
+  // Nieve en las cumbres: solo donde el cerro supera cierta altura
+  if (snow){
+    ctx.fillStyle = snow;
+    var open = false;
+    for (var x2=-40; x2<=W+40; x2+=8){
+      var y2 = ridgeY(x2, off, amp, baseY, freq);
+      var high = y2 < baseY - amp*0.86;
+      if (high && !open){ ctx.beginPath(); ctx.moveTo(x2, y2 + 26); open = true; }
+      if (open) ctx.lineTo(x2, y2);
+      if ((!high || x2 > W+32) && open){
+        ctx.lineTo(x2, y2 + 26); ctx.closePath(); ctx.fill(); open = false;
+      }
+    }
+  }
+}
+
+// ── La bahía al fondo ───────────────────────────────────────────────
+// En la referencia el mar aparece al fondo de casi todos los cuadros:
+// es lo que dice "esto es Valparaíso" y no cualquier cerro.
+function drawBahia(hz, par){
+  var seaTop = hz - 2;
+  var g = ctx.createLinearGradient(0, seaTop, 0, seaTop + 30);
+  g.addColorStop(0, '#4b86a8'); g.addColorStop(1, '#79a6bd');
+  ctx.fillStyle = g; ctx.fillRect(0, seaTop, W, 32);
+  // La ciudad baja contra el agua: apenas una línea irregular, muy
+  // desaturada. Cualquier contraste de más y parece un gráfico de barras.
+  ctx.fillStyle = 'rgba(168,168,166,.55)';
+  for (var x=-30; x<W+30; x+=7){
+    var hgt = 2.5 + (Math.sin((x+par*0.5)*0.11)+1)*2.6 + ((x|0)%29===0 ? 4 : 0);
+    ctx.fillRect(x, seaTop - hgt + 1, 6, hgt);
+  }
+  // Barcos fondeados
+  ctx.fillStyle = 'rgba(60,66,74,.45)';
+  for (var b=0; b<4; b++){
+    var bx = ((b*233 + par*0.25) % (W+80)) - 40;
+    ctx.fillRect(bx, seaTop + 9 + b*4, 11, 2.2);
+  }
+}
+
+// ── La maraña de cables ─────────────────────────────────────────────
+function drawCables(hz){
+  ctx.save();
+  ctx.strokeStyle = 'rgba(28,30,36,.60)';
+  var fase = (position * 0.00055) % 1;
+  for (var c=0; c<5; c++){
+    var y0 = hz - 96 - c*26 + Math.sin(fase*6.28 + c)*7;
+    ctx.lineWidth = 1.4 + c*0.25;
+    ctx.beginPath();
+    ctx.moveTo(-20, y0 - 22);
+    ctx.quadraticCurveTo(W*0.5, y0 + 20 + c*5, W + 20, y0 - 26);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function renderRoad(){
+  var baseIdx = Math.floor(position / SEG_LEN);
+  var base = segAt(baseIdx);
+  if (!base) return;
+  var basePct = (position % SEG_LEN) / SEG_LEN;
+
+  var playerY = segY(position + PLAYER_Z);
+  // La cámara sigue al rider en el aire solo a medias. Si lo siguiera
+  // del todo, el salto no se notaría; si no lo siguiera nada, en las
+  // caídas largas el rider se va del cuadro.
+  var camY = playerY + (airborne ? (airY - playerY)*0.55 : 0) + CAM_HEIGHT;
+
+  var maxy = H;
+  var x = 0, dx = -(base.curve * basePct);
+  var visible = [];
+
+  for (var n = 0; n < DRAW_DIST; n++){
+    var s = segAt(baseIdx + n);
+    if (!s) break;
+    s.fog = fogAt(n / DRAW_DIST);
+    s.clip = maxy;
+
+    project(s.p1, (camX*ROAD_W) - x,      camY, position);
+    project(s.p2, (camX*ROAD_W) - x - dx, camY, position);
+
+    x += dx;
+    dx += s.curve;
+
+    if (s.p1.camera.z <= CAM_DEPTH || s.p2.screen.y >= s.p1.screen.y || s.p2.screen.y >= maxy) continue;
+
+    var p1 = s.p1.screen, p2 = s.p2.screen, c = bandColors(s.band);
+    var r1 = p1.w/5.2, r2 = p2.w/5.2;
+    var l1 = p1.w/22,  l2 = p2.w/22;
+
+    // Pasto
+    ctx.fillStyle = c.grass;
+    ctx.fillRect(0, p2.y, W, p1.y - p2.y);
+    // Berma exterior
+    poly(p1.x-p1.w-r1*2.6, p1.y, p1.x-p1.w, p1.y, p2.x-p2.w, p2.y, p2.x-p2.w-r2*2.6, p2.y, c.berm);
+    poly(p1.x+p1.w+r1*2.6, p1.y, p1.x+p1.w, p1.y, p2.x+p2.w, p2.y, p2.x+p2.w+r2*2.6, p2.y, c.berm);
+    // Rumble
+    poly(p1.x-p1.w-r1, p1.y, p1.x-p1.w, p1.y, p2.x-p2.w, p2.y, p2.x-p2.w-r2, p2.y, c.rumble);
+    poly(p1.x+p1.w+r1, p1.y, p1.x+p1.w, p1.y, p2.x+p2.w, p2.y, p2.x+p2.w+r2, p2.y, c.rumble);
+    // Pista
+    poly(p1.x-p1.w, p1.y, p1.x+p1.w, p1.y, p2.x+p2.w, p2.y, p2.x-p2.w, p2.y, c.road);
+    // Línea central discontinua (solo en asfalto)
+    if (c.lane){
+      poly(p1.x-l1, p1.y, p1.x+l1, p1.y, p2.x+l2, p2.y, p2.x-l2, p2.y, c.lane);
+    }
+
+    // ── Raíces y piedra suelta sobre la tierra ──────────────────────
+    // Se dibujan sobre el propio trapecio del segmento, así siguen la
+    // perspectiva sin costo: son el detalle que hace que el suelo se
+    // sienta sendero de bosque y no una alfombra lisa.
+    if (s.decal === 'root'){
+      var rw2 = (p1.w + p2.w)*0.5, ry2 = (p1.y + p2.y)*0.5, rx2 = (p1.x + p2.x)*0.5;
+      ctx.strokeStyle = 'rgba(52,35,20,.72)';
+      ctx.lineWidth = Math.max(1, rw2*0.055);
+      ctx.beginPath();
+      ctx.moveTo(rx2 - rw2*1.02, ry2 + rw2*0.05);
+      ctx.bezierCurveTo(rx2 - rw2*0.3, ry2 - rw2*0.10,
+                        rx2 + rw2*0.3, ry2 + rw2*0.12,
+                        rx2 + rw2*1.02, ry2 - rw2*0.04);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(150,116,72,.35)';
+      ctx.lineWidth = Math.max(0.6, rw2*0.02);
+      ctx.stroke();
+    } else if (s.decal === 'stairs'){
+      // Peldaños: una franja clara con su sombra en el canto
+      var sw = (p1.w + p2.w)*0.5;
+      poly(p1.x-p1.w, p1.y, p1.x+p1.w, p1.y,
+           p2.x+p2.w, p2.y, p2.x-p2.w, p2.y, 'rgba(232,226,214,.55)');
+      ctx.strokeStyle = 'rgba(48,44,40,.55)';
+      ctx.lineWidth = Math.max(1, sw*0.035);
+      ctx.beginPath(); ctx.moveTo(p1.x-p1.w, p1.y); ctx.lineTo(p1.x+p1.w, p1.y); ctx.stroke();
+    } else if (s.decal === 'rocks'){
+      var rw3 = (p1.w + p2.w)*0.5, ry3 = (p1.y + p2.y)*0.5, rx3 = (p1.x + p2.x)*0.5;
+      for (var q=0; q<5; q++){
+        var t2 = ((q*0.37 + s.decalSeed) % 1) * 1.7 - 0.85;
+        var rr = rw3*(0.030 + ((q*7)%3)*0.012);
+        ctx.fillStyle = q%2 ? 'rgba(126,118,106,.85)' : 'rgba(96,88,78,.85)';
+        ctx.beginPath(); ctx.ellipse(rx3 + t2*rw3, ry3, rr, rr*0.62, 0, 0, Math.PI*2); ctx.fill();
+      }
+    }
+
+    fogFill(p2.y, p1.y - p2.y, s.fog);
+    maxy = p2.y;
+    visible.push(s);
+  }
+
+  // Sprites e items: de lejos a cerca invertido (pintar del fondo hacia el frente)
+  for (var v = visible.length-1; v >= 0; v--){
+    var sg = visible[v];
+    // Los sprites de los 4 segmentos más cercanos se proyectan enormes y
+    // tapan media pantalla justo donde el jugador necesita ver. No se
+    // dibujan: a esa distancia ya estarían fuera de cuadro igual.
+    if (sg.index - baseIdx < 4) continue;
+    var sp1 = sg.p1.screen;
+    var i;
+    for (i=0;i<sg.sprites.length;i++)
+      drawSprite(sg.sprites[i].src, sp1.scale, sp1.x, sp1.y, sg.sprites[i].off, sg.clip, sg.fog, sg.sprites[i].arch);
+    for (i=0;i<sg.items.length;i++){
+      var it = sg.items[i];
+      if (it.taken) continue;
+      var bob = 0, lift = 0;
+      if (it.type === 'coin'){
+        bob  = Math.sin(elapsed*5 + sg.index)*0.05;
+        // Altura en unidades de MUNDO, no en píxeles: si no, los piñones
+        // cercanos se van al cielo y los lejanos quedan enterrados.
+        lift = 460 + Math.sin(elapsed*4 + sg.index)*70;
+      }
+      var liftPx = sp1.scale * lift * (H/2);
+      drawSprite(it.src, sp1.scale, sp1.x, sp1.y - liftPx, it.off + bob, sg.clip, sg.fog);
+    }
+  }
+}
+
+function drawSprite(sprite, scale, roadX, roadY, offset, clipY, fog, isArch){
+  // El factor ROAD_W es clave: la escala del sprite tiene que ir amarrada
+  // al ancho de la pista, si no queda microscópico y no se ve nada.
+  var k = scale * (W/2) * SPRITE_SCALE * ROAD_W * (isArch ? 2.4 : 1);
+  var dw = sprite.w * k;
+  var dh = sprite.h * k;
+  if (dw < 0.6 || dh < 0.6) return;
+  var dx2 = roadX + (scale * offset * ROAD_W * W/2) - dw/2;
+  var dy2 = roadY - dh;
+  var clipH = clipY ? Math.max(0, dy2 + dh - clipY) : 0;
+  if (clipH >= dh) return;
+  if (dx2 > W || dx2 + dw < 0) return;
+
+  ctx.globalAlpha = Math.max(0, Math.min(1, fog));
+  ctx.drawImage(sprite.img, 0, 0, sprite.w, sprite.h*(1-clipH/dh), dx2, dy2, dw, dh - clipH);
+  ctx.globalAlpha = 1;
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  RIDER — rig articulado
+//  Encuadre de GoPro en pértiga: la cámara va unos metros atrás y algo
+//  más arriba, así que se ve la bicicleta entera desde atrás.
+//  Lo que la hace creíble no es el detalle: es el movimiento. Sobre
+//  todo que la BICI se tumbe más que el CUERPO, como en el MTB real.
+// ════════════════════════════════════════════════════════════════════
+var SKINS = ['mtb','bmx','moto'];
+var SKIN_LABEL = { mtb:'🚵 MTB', bmx:'🚲 BMX', moto:'🏍️ MOTO' };
+var skin = 'mtb';
+
+var BIKES = {
+  // Referencia: GoPro siguiendo al rider de adelante en Whistler.
+  // Ahí el rider TAPA casi toda la bici — solo asoma la rueda trasera y
+  // algo de cuadro. Y se lee como silueta oscura contra la tierra clara:
+  // lo único luminoso es el casco. Por eso la paleta es casi monocroma.
+  mtb : { frame:'#2b2f36', frameDk:'#1a1d22', jersey:'#23272e', jerseyDk:'#15181d',
+          accent:'#d85a22', rw:15, rh:23, fw:10, fh:15, bar:21, seat:-34, travel:8, wb:50, knobs:true },
+  bmx : { frame:'#3a2b46', frameDk:'#241a2c', jersey:'#2e2233', jerseyDk:'#1b141f',
+          accent:'#e0a020', rw:13, rh:19, fw:9,  fh:13, bar:25, seat:-24, travel:2, wb:40, knobs:false },
+  moto: { frame:'#7d2228', frameDk:'#4e1418', jersey:'#2a2d33', jerseyDk:'#191c21',
+          accent:'#c8242c', rw:18, rh:25, fw:12, fh:17, bar:31, seat:-33, travel:11, wb:56, knobs:true }
+};
+
+// Estado animado. Todo se interpola con dt, así que va igual a 60 o 120 Hz.
+var rig = { susR:0, susF:0, bikeLean:0, bodyLean:0, bar:0, crank:0, stand:0, whip:0, bob:0, yaw:0 };
+
+function updateRig(dt){
+  var sp = speed / MAX_SPEED;
+
+  // Cadencia de pedaleo: sube con la velocidad, casi se detiene de pie
+  rig.crank += dt * (2 + sp*15) * (1 - rig.stand*0.75);
+
+  // De pie sobre los pedales: en el aire, en las bajadas fuertes y al girar
+  var wantStand = airborne ? 1 : clamp(camPitch/50 + Math.abs(steerVis)*0.35, 0, 1);
+  rig.stand = lerp(rig.stand, wantStand, 1 - Math.pow(0.02, dt));
+
+  // Suspensión: se estira en el aire, se hunde al aterrizar, vibra en el terreno
+  var wantSus = airborne ? -0.85 : (0.20 + sp*0.30);
+  rig.susR = lerp(rig.susR, wantSus, 1 - Math.pow(0.006, dt));
+  rig.susF = lerp(rig.susF, wantSus*0.85, 1 - Math.pow(0.003, dt));
+  rig.bob  = airborne ? 0 : Math.sin(elapsed*(8 + sp*20)) * sp * 1.4;
+
+  // El cuerpo se mantiene más vertical que la bici — técnica real de MTB
+  rig.bikeLean = lerp(rig.bikeLean, lean*0.95, 1 - Math.pow(0.004, dt));
+  rig.bodyLean = lerp(rig.bodyLean, lean*0.55, 1 - Math.pow(0.012, dt));
+  rig.bar      = lerp(rig.bar, steerVis*0.34, 1 - Math.pow(0.0015, dt));
+
+  // Giro de cámara: CERO en recta, se abre al virar. Doblando a la
+  // izquierda se destapa el flanco izquierdo de la bici, y al revés.
+  // Antes era fijo y por eso el rider iba siempre torcido.
+  rig.yaw = lerp(rig.yaw, -steerVis*0.55, 1 - Math.pow(0.008, dt));
+
+  // Whip: en el aire, girar tira la cola de la bici de lado
+  rig.whip = lerp(rig.whip, airborne ? steerVis*0.60 : 0, 1 - Math.pow(0.02, dt));
+}
+
+// ── Rueda con taco (lo que distingue una MTB de una bici de ruta) ───
+function mtbWheel(x, y, rx, ry, spin, knobs){
+  ctx.fillStyle = '#0c0c0e';
+  ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI*2); ctx.fill();
+  if (knobs){
+    ctx.fillStyle = '#181a1c';
+    for (var k=0; k<14; k++){
+      var a = spin*0.6 + k*(Math.PI*2/14);
+      var kx = x + Math.cos(a)*rx, ky = y + Math.sin(a)*ry;
+      ctx.beginPath(); ctx.ellipse(kx, ky, rx*0.16, ry*0.09, a, 0, Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.strokeStyle = '#8f959d'; ctx.lineWidth = 2.6;
+  ctx.beginPath(); ctx.ellipse(x, y, rx-4.5, ry-4.5, 0, 0, Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = 'rgba(215,222,230,.9)'; ctx.lineWidth = 1.1;
+  ctx.beginPath(); ctx.ellipse(x, y, rx-6.2, ry-6.2, 0, 0, Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = 'rgba(170,178,188,.7)'; ctx.lineWidth = 1;
+  for (var a2=0; a2<Math.PI*2; a2+=Math.PI/6){
+    var an = a2 + spin;
+    ctx.beginPath();
+    ctx.moveTo(x + Math.cos(an)*3.2, y + Math.sin(an)*3.2);
+    ctx.lineTo(x + Math.cos(an)*(rx-6), y + Math.sin(an)*(ry-6));
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#c9ced5'; ctx.beginPath(); ctx.arc(x, y, 3.6, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#5c6169'; ctx.beginPath(); ctx.arc(x, y, 1.6, 0, Math.PI*2); ctx.fill();
+}
+
+// ── La bici, desde atrás ────────────────────────────────────────────
+function drawBike(B){
+  var comp = rig.susR * B.travel;          // hundimiento de la suspensión
+  var axleY = -B.rh;
+  var bbY   = axleY * 0.78 + comp;         // eje de pedalier
+  var seatY = B.seat + comp;
+  var barY  = seatY - 22 + comp*0.4;
+  var bt    = rig.bar;                     // giro del manubrio
+
+  // ── Distancia entre ejes ──────────────────────────────────────────
+  // Desde EXACTAMENTE atrás una bici real también parece monociclo: la
+  // delantera queda tapada por la trasera. Por eso la cámara va con un
+  // tres cuartos leve — la delantera se corre al costado y sube por la
+  // distancia, y se ven los tubos que unen las dos ruedas.
+  var YAW  = rig.yaw;                          // 0 en recta, se abre al virar
+  var fx   = Math.sin(YAW)*B.wb + Math.sin(bt)*13;   // corrimiento lateral
+  var forkY = axleY - B.wb*0.30 - rig.susF*B.travel*0.5;   // más lejos = más arriba
+  var crownY = forkY - B.fh - 4;
+
+  // ── Rueda delantera: más chica por la distancia
+  var fwNarrow = Math.max(3.5, B.fw * Math.cos(bt*1.1));
+  mtbWheel(fx, forkY, fwNarrow, B.fh, rig.crank*1.5, B.knobs);
+
+  // Horquilla invertida con botellas
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#b9c0c8'; ctx.lineWidth = 4.6;
+  ctx.beginPath(); ctx.moveTo(fx-4.2, crownY); ctx.lineTo(fx-4.4, forkY + B.fh*0.5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(fx+4.2, crownY); ctx.lineTo(fx+4.4, forkY + B.fh*0.5); ctx.stroke();
+  ctx.strokeStyle = '#71777f'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(fx-4.2, crownY); ctx.lineTo(fx-4.3, forkY - 1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(fx+4.2, crownY); ctx.lineTo(fx+4.3, forkY - 1); ctx.stroke();
+  // Tubo de dirección hasta el manubrio
+  ctx.strokeStyle = B.frameDk; ctx.lineWidth = 4.4;
+  ctx.beginPath(); ctx.moveTo(fx, crownY); ctx.lineTo(fx*0.55, barY + 2); ctx.stroke();
+
+  // ── Los dos tubos que hacen que el ojo lea BICICLETA ───────────────
+  ctx.strokeStyle = B.frame; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(0, bbY); ctx.lineTo(fx*0.62, crownY + 6); ctx.stroke();   // tubo diagonal
+  ctx.strokeStyle = B.frameDk; ctx.lineWidth = 4.2;
+  ctx.beginPath(); ctx.moveTo(0, seatY + 5); ctx.lineTo(fx*0.55, barY + 4); ctx.stroke(); // tubo superior
+
+  // ── Manubrio ancho
+  var bx = Math.cos(bt) * B.bar, by = Math.sin(bt) * B.bar * 0.42;
+  ctx.strokeStyle = '#33373d'; ctx.lineWidth = 5.2;
+  ctx.beginPath(); ctx.moveTo(-bx, barY - by); ctx.lineTo(bx, barY + by); ctx.stroke();
+  ctx.fillStyle = B.accent;
+  ctx.beginPath(); ctx.ellipse(-bx, barY - by, 5, 3.2, -bt*0.4, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse( bx, barY + by, 5, 3.2,  bt*0.4, 0, Math.PI*2); ctx.fill();
+
+  // ── Cuadro
+  ctx.strokeStyle = B.frame; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(0, bbY); ctx.lineTo(0, seatY + 4); ctx.stroke();      // tubo de asiento
+  ctx.strokeStyle = B.frameDk; ctx.lineWidth = 3.6;
+  ctx.beginPath(); ctx.moveTo(-4, axleY); ctx.lineTo(-6.5, seatY + 6); ctx.stroke(); // vainas
+  ctx.beginPath(); ctx.moveTo( 4, axleY); ctx.lineTo( 6.5, seatY + 6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-4, axleY); ctx.lineTo(-2.5, bbY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo( 4, axleY); ctx.lineTo( 2.5, bbY); ctx.stroke();
+  // Amortiguador trasero
+  if (B.travel > 4){
+    ctx.strokeStyle = '#e8b020'; ctx.lineWidth = 4.4;
+    ctx.beginPath(); ctx.moveTo(-3, seatY + 12); ctx.lineTo(2, bbY - 4); ctx.stroke();
+  }
+  // Sillín
+  ctx.fillStyle = '#16181b';
+  ctx.beginPath(); ctx.ellipse(0, seatY, 7, 2.8, 0, 0, Math.PI*2); ctx.fill();
+
+  // ── Rueda trasera: la más cercana a la cámara, la más grande
+  mtbWheel(0, axleY, B.rw, B.rh, rig.crank*1.5, B.knobs);
+
+  // ── Bielas y pedales
+  // Los pedales van pegados a la rueda, como se ve en la referencia:
+  // apenas asoman los pies y las pantorrillas por los costados.
+  var cr = rig.crank, px0 = B.rw - 3;
+  ctx.strokeStyle = '#9aa0a8'; ctx.lineWidth = 3;
+  var pL = { x: -px0 - Math.cos(cr)*3, y: bbY + Math.sin(cr)*7 };
+  var pR = { x:  px0 + Math.cos(cr)*3, y: bbY - Math.sin(cr)*7 };
+  ctx.beginPath(); ctx.moveTo(0, bbY); ctx.lineTo(pL.x, pL.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, bbY); ctx.lineTo(pR.x, pR.y); ctx.stroke();
+  ctx.fillStyle = '#2a2d31';
+  ctx.fillRect(pL.x-7, pL.y-1.6, 14, 3.4);
+  ctx.fillRect(pR.x-7, pR.y-1.6, 14, 3.4);
+  return { bbY: bbY, seatY: seatY, barY: barY, bx: bx, by: by, pL: pL, pR: pR };
+}
+
+// ── El rider ────────────────────────────────────────────────────────
+function drawBody(B, j){
+  var st   = rig.stand;
+  var hipY = j.seatY - 4 - st*11;          // de pie, las caderas suben
+  var shY  = hipY - 23 - st*3;             // hombros
+  var lean2 = rig.bodyLean - rig.bikeLean; // el cuerpo compensa a la bici
+
+  ctx.save();
+  ctx.translate(0, hipY); ctx.rotate(lean2); ctx.translate(0, -hipY);
+
+  // ── Piernas: del pedal a la cadera, con la rodilla afuera
+  function leg(p, side){
+    var kneeX = p.x + side*5, kneeY = (hipY + p.y)/2 - 3 - st*3;
+    ctx.strokeStyle = '#171a1f'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(side*6, hipY); ctx.quadraticCurveTo(kneeX, kneeY, p.x, p.y - 3); ctx.stroke();
+    ctx.strokeStyle = '#0d0f12'; ctx.lineWidth = 4.5;
+    ctx.beginPath(); ctx.moveTo(kneeX, kneeY); ctx.lineTo(p.x, p.y - 3); ctx.stroke();
+    ctx.fillStyle = '#0d0f12';                       // zapatilla
+    ctx.fillRect(p.x - 6, p.y - 4.5, 12, 4.5);
+  }
+  leg(j.pL, -1); leg(j.pR, 1);
+
+  // ── Torso inclinado hacia adelante (postura de ataque)
+  ctx.fillStyle = '#14171b';
+  ctx.beginPath(); ctx.moveTo(-10, hipY-2); ctx.lineTo(10, hipY-2);
+  ctx.lineTo(8.5, hipY+7); ctx.lineTo(-8.5, hipY+7); ctx.closePath(); ctx.fill();
+  var g = ctx.createLinearGradient(-14, shY, 14, hipY);
+  g.addColorStop(0, B.jersey); g.addColorStop(1, B.jerseyDk);
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(-11, hipY); ctx.lineTo(11, hipY);
+  ctx.lineTo(14.5, shY); ctx.lineTo(-14.5, shY);
+  ctx.closePath(); ctx.fill();
+  // Una sola línea de color en los hombros. Nada más: la silueta manda.
+  ctx.fillStyle = B.accent; ctx.fillRect(-14.5, shY, 29, 2.4);
+  // Luz de canto en el hombro derecho — despega al rider del fondo
+  ctx.fillStyle = 'rgba(255,236,200,.20)';
+  ctx.beginPath(); ctx.moveTo(11, hipY); ctx.lineTo(14.5, shY);
+  ctx.lineTo(10.5, shY); ctx.lineTo(8, hipY); ctx.closePath(); ctx.fill();
+
+  // ── Brazos hasta los puños, con el codo alto
+  // Los brazos caen del hombro hacia abajo y adelante, con el codo apenas
+  // afuera. Nada de salir en horizontal: eso es lo que parecía una pinza.
+  function arm(gx, gy, side){
+    var elbowX = side*(14 + st*3), elbowY = shY + 9;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = B.jersey; ctx.lineWidth = 6.2;
+    ctx.beginPath();
+    ctx.moveTo(side*11, shY+2);
+    ctx.quadraticCurveTo(elbowX, elbowY, gx, gy);
+    ctx.stroke();
+    ctx.strokeStyle = B.jerseyDk; ctx.lineWidth = 3.2;
+    ctx.beginPath();
+    ctx.moveTo(elbowX, elbowY);
+    ctx.lineTo(gx, gy);
+    ctx.stroke();
+    ctx.fillStyle = '#0d0f12';
+    ctx.beginPath(); ctx.ellipse(gx, gy, 4.2, 3.4, 0, 0, Math.PI*2); ctx.fill();
+  }
+  arm(-j.bx, j.barY - j.by, -1);
+  arm( j.bx, j.barY + j.by,  1);
+
+  // ── Casco integral
+  var HC = shY - 13;
+  ctx.fillStyle = B.jersey;
+  ctx.beginPath(); ctx.ellipse(0, HC, 13.5, 14.5, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#eef0f3';
+  ctx.beginPath(); ctx.ellipse(0, HC, 13.5, 14.5, 0, Math.PI, Math.PI*2); ctx.fill();
+  ctx.fillStyle = B.accent; ctx.fillRect(-13.5, HC-1, 27, 4);
+  ctx.fillStyle = '#0e1012';                                  // visera
+  ctx.beginPath(); ctx.moveTo(-13.5, HC-11); ctx.lineTo(-12, HC-19);
+  ctx.lineTo(12, HC-19); ctx.lineTo(13.5, HC-11); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#17191c';                                  // mentonera
+  ctx.beginPath(); ctx.moveTo(-10, HC+10); ctx.lineTo(-12, HC+18);
+  ctx.lineTo(12, HC+18); ctx.lineTo(10, HC+10); ctx.closePath(); ctx.fill();
+  var vg = ctx.createLinearGradient(0, HC-4, 0, HC+6);        // antiparras
+  vg.addColorStop(0, 'rgba(24,42,68,.96)'); vg.addColorStop(1, 'rgba(96,158,214,.78)');
+  ctx.fillStyle = vg;
+  ctx.beginPath(); ctx.moveTo(-11.5, HC-3); ctx.lineTo(-13, HC+5);
+  ctx.lineTo(13, HC+5); ctx.lineTo(11.5, HC-3); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.32)';
+  ctx.beginPath(); ctx.moveTo(-8.5, HC-2); ctx.lineTo(-9.5, HC+2);
+  ctx.lineTo(-1.5, HC+2); ctx.lineTo(-0.5, HC-2); ctx.closePath(); ctx.fill();
+
+  ctx.restore();
+}
+
+function drawRider(){
+  if (phase === 'menu') return;
+  if (invuln > 0 && Math.floor(elapsed*18) % 2 === 0) return;
+
+  var B  = BIKES[skin] || BIKES.mtb;
+  var sp = speed / MAX_SPEED;
+  var groundY = segY(position + PLAYER_Z);
+  var height  = airborne ? (airY - groundY) : 0;
+
+  var gY    = H*0.905;
+  var baseX = riderSX();
+  // La cámara ya absorbe el 55% de la altura; aquí va el resto, con
+  // tope. En una bajada empinada el suelo se hunde y "altura" se
+  // dispara aunque el rider no vuele tanto: sin el tope se va del cuadro.
+  var baseY = gY - Math.min(62, height*0.020) + rig.bob;
+  var s     = 1.26 + sp*0.09;
+
+  // Sombra: se achica y se aclara al despegar
+  var shA = clamp(0.34 - height*0.00016, 0.05, 0.34);
+  var shW = 44 * s * clamp(1 - height*0.00022, 0.4, 1);
+  ctx.fillStyle = 'rgba(0,0,0,'+shA+')';
+  ctx.beginPath(); ctx.ellipse(baseX, gY + 4, shW, shW*0.19, 0, 0, Math.PI*2); ctx.fill();
+
+  ctx.save();
+  ctx.translate(baseX, baseY);
+  ctx.scale(s, s);
+
+  // Backflip: rotación sagital, entra y sale de la pantalla
+  if (Math.abs(flipAng) > 0.01){
+    var cf = Math.cos(flipAng), sf = Math.abs(Math.sin(flipAng));
+    var persp = 1 + sf*0.30;
+    ctx.scale(persp, cf*persp);
+  }
+
+  // 360: giro sobre el eje vertical. A mitad de vuelta la bici queda de
+  // perfil (casi sin ancho) y luego se ve por el otro lado.
+  if (Math.abs(spinAng) > 0.01){
+    var cs = Math.cos(spinAng);
+    if (Math.abs(cs) < 0.16) cs = 0.16 * (cs < 0 ? -1 : 1);
+    ctx.scale(cs, 1);
+  }
+
+  // La bici se tumba; el cuerpo lo corrige después dentro de drawBody
+  ctx.save();
+  ctx.rotate(rig.bikeLean);
+  ctx.translate(rig.whip*9, 0);
+  var joints = drawBike(B);
+  ctx.restore();
+
+  ctx.save();
+  ctx.rotate(rig.bikeLean);
+  drawBody(B, joints);
+  ctx.restore();
+
+  ctx.restore();
+}
+// ════════════════════════════════════════════════════════════════════
+//  EFECTOS DE VELOCIDAD
+// ════════════════════════════════════════════════════════════════════
+function drawSpeedFx(){
+  var sp = speed/MAX_SPEED;
+  var hz = horizonY();
+
+  // Líneas de velocidad saliendo del punto de fuga
+  var intensity = Math.max(0, sp - 0.55) / 0.45;
+  if (boost > 0) intensity = Math.max(intensity, 0.85);
+  if (intensity > 0.02){
+    ctx.save();
+    ctx.strokeStyle = boost > 0 ? 'rgba(255,220,150,'+(0.30*intensity)+')' : 'rgba(255,255,255,'+(0.20*intensity)+')';
+    ctx.lineWidth = 2;
+    var cxp = W/2 - camX*40, cyp = hz;
+    for (var i=0;i<26;i++){
+      var a = (i/26)*Math.PI*2 + elapsed*1.5 + (i%3);
+      var r0 = 150 + ((elapsed*900 + i*97) % 320);
+      var r1 = r0 + 60 + intensity*110;
+      var y0 = cyp + Math.sin(a)*r0*0.62;
+      // Sin rayas sobre el cielo: ahí parecen rayones, no velocidad
+      if (y0 < hz + 12) continue;
+      ctx.globalAlpha = clamp((r0-150)/200, 0, 1) * intensity;
+      ctx.beginPath();
+      ctx.moveTo(cxp + Math.cos(a)*r0, y0);
+      ctx.lineTo(cxp + Math.cos(a)*r1, cyp + Math.sin(a)*r1*0.62);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  // Partículas de polvo
+  for (var p=0;p<parts.length;p++){
+    var q = parts[p];
+    var a = (q.life/q.max) * 0.30;
+    ctx.fillStyle = 'rgba(196,176,146,'+a+')';
+    ctx.beginPath(); ctx.arc(q.x, q.y, q.r, 0, Math.PI*2); ctx.fill();
+  }
+
+  // Viñeta que se cierra con la velocidad
+  var vig = 0.12 + sp*0.30 + (boost>0?0.16:0);
+  var vg = ctx.createRadialGradient(W/2, H*0.55, H*0.28, W/2, H*0.55, H*0.95);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,'+vig+')');
+  ctx.fillStyle = vg; ctx.fillRect(0,0,W,H);
+
+  // Flash blanco
+  if (flash > 0){
+    ctx.fillStyle = 'rgba(255,255,255,'+(flash*0.42)+')';
+    ctx.fillRect(0,0,W,H);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  HUD
+// ════════════════════════════════════════════════════════════════════
+function panel(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  ctx.fillStyle='rgba(12,18,24,.62)'; ctx.fill();
+  ctx.strokeStyle='rgba(150,210,255,.22)'; ctx.lineWidth=1; ctx.stroke();
+}
+function outText(t,x,y,fill,lw){
+  ctx.lineJoin='round'; ctx.lineWidth=lw||4; ctx.strokeStyle='rgba(0,0,0,.7)';
+  ctx.strokeText(t,x,y); ctx.fillStyle=fill; ctx.fillText(t,x,y);
+}
+
+function hud(){
+  var sp = speed/MAX_SPEED;
+  var km = (position/UNITS_PER_KM).toFixed(2);
+
+  // ── Cronómetro: es una contrarreloj, el reloj manda ────────────────
+  panel(10,10,196,58,8);
+  ctx.textAlign='left';
+  ctx.font='bold 8px Arial'; ctx.fillStyle='#6fd0ff';
+  ctx.fillText('TIEMPO', 20, 25);
+  ctx.font='bold 27px Impact,Arial Black,sans-serif';
+  ctx.fillStyle = splitFlash > 0 ? '#5ef0b4' : '#fff';
+  ctx.font='bold 27px Impact,Arial Black,sans-serif';
+  ctx.fillText(fmtTime(raceTime + penalty - coins), 20, 50);
+  ctx.font='8px Arial'; ctx.fillStyle='rgba(255,255,255,.55)';
+  ctx.fillText('MEJOR '+fmtTime(bestTime[stageId]), 20, 62);
+  ctx.textAlign='right';
+  if (penalty > 0){ ctx.font='bold 10px Arial'; ctx.fillStyle='#ff6a4a'; ctx.fillText('+'+penalty+'s', 196, 25); }
+  if (coins > 0){ ctx.font='bold 10px Arial'; ctx.fillStyle='#5ef0b4'; ctx.fillText('-'+coins+'s', 196, 38); }
+
+  // ── Avance de la etapa ─────────────────────────────────────────────
+  var prog = clamp((position + PLAYER_Z) / (raceSegs*SEG_LEN), 0, 1);
+  var bx = 218, bw = W - 218 - 108;
+  ctx.fillStyle='rgba(12,18,24,.55)'; ctx.fillRect(bx, 20, bw, 6);
+  ctx.fillStyle='#6fd0ff'; ctx.fillRect(bx, 20, bw*prog, 6);
+  ctx.fillStyle='#fff';
+  ctx.beginPath(); ctx.arc(bx + bw*prog, 23, 4.5, 0, Math.PI*2); ctx.fill();
+  ctx.textAlign='center'; ctx.font='bold 8px Arial'; ctx.fillStyle='rgba(255,255,255,.6)';
+  ctx.fillText(S().name + '  ·  ' + km + ' / ' + S().km.toFixed(1) + ' KM', bx + bw/2, 40);
+  ctx.textAlign='left';
+
+  // Vidas
+  ctx.textAlign='left';
+  for (var i=0;i<3;i++){
+    var lx = W-30-i*26, on = i < lives;
+    ctx.beginPath(); ctx.arc(lx,26,9,0,Math.PI*2);
+    ctx.fillStyle = on ? '#f5c518' : 'rgba(255,255,255,.10)'; ctx.fill();
+    ctx.strokeStyle = on ? '#fff4b8' : 'rgba(255,255,255,.22)'; ctx.lineWidth=2; ctx.stroke();
+    if (on){ ctx.fillStyle='rgba(0,0,0,.35)'; ctx.beginPath(); ctx.arc(lx,26,3,0,Math.PI*2); ctx.fill(); }
+  }
+
+  // Velocímetro
+  var pw=190, ph=52, px=10, py=H-62;
+  panel(px,py,pw,ph,8);
+  ctx.font='bold 8px Arial'; ctx.fillStyle='#6fd0ff'; ctx.textAlign='left';
+  ctx.fillText('VELOCIDAD', px+12, py+15);
+  ctx.textAlign='right'; ctx.fillStyle='#fff'; ctx.font='bold 14px Impact,Arial Black,sans-serif';
+  ctx.fillText(Math.round(sp*112)+' KM/H', px+pw-12, py+16);
+  ctx.textAlign='left';
+  ctx.fillStyle='rgba(0,0,0,.4)'; ctx.fillRect(px+12,py+21,pw-24,7);
+  ctx.fillStyle='hsl('+(190-sp*175)+',85%,55%)'; ctx.fillRect(px+12,py+21,(pw-24)*Math.min(1,sp),7);
+
+  ctx.font='bold 8px Arial';
+  ctx.fillStyle = boost>0 ? '#ffcc44' : '#6fd0ff';
+  ctx.fillText(boost>0 ? '⚡ IMPULSO' : 'TURBO', px+12, py+42);
+  ctx.fillStyle='rgba(0,0,0,.4)'; ctx.fillRect(px+12,py+45,pw-24,7);
+  ctx.fillStyle = boost>0 ? '#fff' : '#f5c518';
+  ctx.fillRect(px+12,py+45,(pw-24)*(boost>0 ? 1 : turbo/100),7);
+
+  // ── Estado de los trucos en el aire ───────────────────────────────
+  // Antes solo se veía un arco sin explicar. Ahora dice qué truco está
+  // corriendo, cuánto falta, y si vas a clavarlo o a caerte.
+  if (airborne){
+    var filas = [];
+    var TAU2 = Math.PI*2;
+    if (Math.abs(spinAng) > 0.05)
+      filas.push({ n:'360', p: Math.abs(spinAng)/TAU2 });
+    if (Math.abs(flipAng) > 0.05)
+      filas.push({ n:'BACKFLIP', p: Math.abs(flipAng)/TAU2 });
+    if (whipPeak > 0.20)
+      filas.push({ n:'WHIP', p: 1, ok: whipPeak > 0.50 && Math.abs(rig.whip) < 0.38 });
+
+    var peligro = false;
+    for (var f=0; f<filas.length; f++){
+      var fila = filas[f];
+      if (fila.ok === undefined){
+        var vuelta = fila.p % 1;
+        fila.ok = (fila.p >= 0.90) || vuelta < 0.20;   // recto o vuelta cumplida
+        if (!fila.ok) peligro = true;
+      }
+    }
+
+    var fy = H - 62 - filas.length*22;
+    for (var f2=0; f2<filas.length; f2++){
+      var r2 = filas[f2], ry = fy + f2*22;
+      panel(W-166, ry, 156, 19, 5);
+      ctx.font='bold 9px Arial'; ctx.textAlign='left';
+      ctx.fillStyle = r2.ok ? '#5ef0b4' : '#ff6a4a';
+      ctx.fillText(r2.n, W-158, ry+13);
+      if (r2.n !== 'WHIP'){
+        ctx.fillStyle='rgba(0,0,0,.45)'; ctx.fillRect(W-84, ry+7, 66, 6);
+        ctx.fillStyle = r2.ok ? '#5ef0b4' : '#ff6a4a';
+        ctx.fillRect(W-84, ry+7, 66*Math.min(1, r2.p%1 || (r2.p>=0.9?1:0)), 6);
+      } else {
+        ctx.textAlign='right';
+        ctx.fillText(r2.ok ? 'LISTO' : 'ENDEREZA', W-18, ry+13);
+      }
+      ctx.textAlign='left';
+    }
+    if (peligro && Math.floor(elapsed*8)%2===0){
+      ctx.textAlign='center'; ctx.font='bold 15px Impact,Arial Black,sans-serif';
+      outText('COMPLETA EL GIRO', W/2, H-92, '#ff6a4a', 4);
+      ctx.textAlign='left';
+    }
+  }
+  // Intentó un truco sin altura: hay que decirle por qué no salió
+  if (noAirHint > 0){
+    ctx.save(); ctx.globalAlpha = Math.min(1, noAirHint*2.5);
+    ctx.textAlign='center'; ctx.font='bold 14px Impact,Arial Black,sans-serif';
+    outText('SIN ALTURA — BUSCA UNA RAMPA', W/2, H-92, '#f5c518', 4);
+    ctx.restore(); ctx.textAlign='left';
+  }
+
+  // Popup de truco
+  if (trick){
+    var a = Math.min(1, trick.t*2.4);
+    ctx.save(); ctx.globalAlpha = a;
+    ctx.textAlign='center';
+    var pop = 1 + Math.max(0, (1.5-trick.t))*0.0;
+    ctx.font='bold 30px Impact,Arial Black,sans-serif';
+    outText(trick.label, W/2, 108, trick.pts?'#fff':'#ff5544', 5);
+    if (trick.pts){
+      ctx.font='bold 16px Impact,Arial Black,sans-serif';
+      outText('+'+trick.pts, W/2, 132, '#f5c518', 4);
+      if (trick.combo > 1){
+        ctx.font='bold 12px Arial';
+        outText('COMBO x'+trick.combo, W/2, 150, '#6fd0ff', 3);
+      }
+    }
+    ctx.restore(); ctx.textAlign='left';
+  }
+}
+
+// ── Selección de etapa ──────────────────────────────────────────────
+var STAGE_IDS = ['bosque','valpo'];
+var pickIdx = 0;
+
+function stageCard(x, y, w, h, id, sel){
+  var st = STAGES[id];
+  ctx.save();
+  panel(x, y, w, h, 12);
+  if (sel){
+    ctx.strokeStyle = '#6fd0ff'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x+12,y); ctx.arcTo(x+w,y,x+w,y+h,12); ctx.arcTo(x+w,y+h,x,y+h,12);
+    ctx.arcTo(x,y+h,x,y,12); ctx.arcTo(x,y,x+w,y,12); ctx.closePath(); ctx.stroke();
+  }
+  // Miniatura del escenario: cielo y cerros propios de la etapa
+  var th = 66;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x+10, y+10, w-20, th); ctx.clip();
+  var g = ctx.createLinearGradient(0, y+10, 0, y+10+th);
+  st.sky.forEach(function(s2){ g.addColorStop(s2[0], s2[1]); });
+  ctx.fillStyle = g; ctx.fillRect(x+10, y+10, w-20, th);
+  for (var r=0;r<st.ridges.length;r++){
+    var R = st.ridges[r];
+    ctx.fillStyle = R.col;
+    ctx.beginPath(); ctx.moveTo(x+10, y+10+th);
+    for (var px=0; px<=w-20; px+=6){
+      var t = px*0.03*R.freq + r*2;
+      ctx.lineTo(x+10+px, y+42 + r*7 - Math.sin(t)*13 - Math.sin(t*2.1)*6);
+    }
+    ctx.lineTo(x+w-10, y+10+th); ctx.closePath(); ctx.fill();
+  }
+  ctx.fillStyle = st.light.road;
+  ctx.beginPath();
+  ctx.moveTo(x+w/2-4, y+46); ctx.lineTo(x+w/2+4, y+46);
+  ctx.lineTo(x+w/2+34, y+10+th); ctx.lineTo(x+w/2-34, y+10+th);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+
+  ctx.textAlign='left';
+  ctx.font='bold 20px Impact,Arial Black,sans-serif'; ctx.fillStyle = sel ? '#fff' : 'rgba(255,255,255,.75)';
+  ctx.fillText(st.name, x+14, y+th+34);
+  ctx.font='9px Arial'; ctx.fillStyle='#6fd0ff';
+  ctx.fillText(st.place, x+14, y+th+48);
+  ctx.font='bold 10px Arial'; ctx.fillStyle='rgba(255,255,255,.8)';
+  ctx.fillText(st.km.toFixed(1)+' KM', x+14, y+th+68);
+  ctx.textAlign='right';
+  ctx.font='bold 11px Arial';
+  ctx.fillStyle = bestTime[id] ? '#5ef0b4' : 'rgba(255,255,255,.35)';
+  ctx.fillText(fmtTime(bestTime[id]), x+w-14, y+th+68);
+  ctx.restore();
+}
+
+function menu(){
+  ctx.fillStyle='rgba(8,12,18,.78)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  ctx.font='bold 46px Impact,Arial Black,sans-serif';
+  outText('DESCENSO', W/2, 62, '#fff', 7);
+  ctx.font='bold 11px Arial';
+  outText('DOS ETAPAS · CONTRARRELOJ', W/2, 82, '#6fd0ff', 3);
+
+  var cw = 300, ch = 160, gap = 24;
+  stageCard(W/2 - cw - gap/2, 100, cw, ch, 'bosque', pickIdx===0);
+  stageCard(W/2 + gap/2,      100, cw, ch, 'valpo',  pickIdx===1);
+
+  ctx.textAlign='center';
+  ctx.font='10px Arial'; ctx.fillStyle='rgba(255,255,255,.6)';
+  ctx.fillText('← →  ELEGIR ETAPA        ESPACIO  SALTAR', W/2, 292);
+  ctx.fillStyle='rgba(255,255,255,.72)';
+  ctx.fillText('DESDE UNA RAMPA:   ↑ 360      ↓ BACKFLIP      ← → WHIP   (se encadenan)', W/2, 308);
+  ctx.fillStyle='rgba(255,255,255,.45)';
+  ctx.fillText('Cada caída suma 2 s. Cada cronómetro que atrapes te descuenta 1 s.', W/2, 324);
+
+  if (Math.floor(elapsed*1.6)%2===0){
+    ctx.font='bold 17px Impact,Arial Black,sans-serif';
+    outText('▶  TOCA LA ETAPA PARA LARGAR', W/2, 344, '#f5c518', 5);
+  }
+  ctx.textAlign='left';
+}
+
+function finishScreen(){
+  ctx.fillStyle='rgba(8,12,18,.84)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  ctx.font='bold 40px Impact,Arial Black,sans-serif';
+  outText('META', W/2, 76, '#5ef0b4', 7);
+  ctx.font='bold 11px Arial';
+  outText(S().name + ' · ' + S().place, W/2, 96, 'rgba(255,255,255,.7)', 3);
+
+  panel(W/2-190, 112, 380, 146, 12);
+  ctx.font='bold 52px Impact,Arial Black,sans-serif'; ctx.fillStyle='#fff';
+  ctx.fillText(fmtTime(finalTime), W/2, 168);
+
+  // Desglose: así se entiende de dónde salió el tiempo
+  ctx.font='10px Arial';
+  ctx.textAlign='left';  ctx.fillStyle='rgba(255,255,255,.55)';
+  ctx.fillText('En pista', W/2-166, 194);
+  ctx.fillText('Caídas', W/2-166, 212);
+  ctx.fillText('Cronómetros', W/2-166, 230);
+  ctx.textAlign='right'; ctx.font='bold 11px Arial';
+  ctx.fillStyle='#fff';     ctx.fillText(fmtTime(raceTime), W/2-20, 194);
+  ctx.fillStyle='#ff6a4a';  ctx.fillText('+'+penalty.toFixed(0)+'s', W/2-20, 212);
+  ctx.fillStyle='#5ef0b4';  ctx.fillText('-'+coins+'s', W/2-20, 230);
+
+  ctx.textAlign='center';
+  if (improved){
+    ctx.font='bold 15px Impact,Arial Black,sans-serif';
+    outText('★  RÉCORD PERSONAL  ★', W/2+90, 214, '#f5c518', 4);
+  } else {
+    ctx.font='10px Arial'; ctx.fillStyle='rgba(255,255,255,.55)';
+    ctx.fillText('Tu mejor', W/2+90, 198);
+    ctx.font='bold 15px Impact,Arial Black,sans-serif'; ctx.fillStyle='#6fd0ff';
+    ctx.fillText(fmtTime(bestTime[stageId]), W/2+90, 218);
+  }
+
+  if (Math.floor(elapsed*1.6)%2===0){
+    ctx.font='bold 15px Impact,Arial Black,sans-serif';
+    outText('▶  TOCA PARA VOLVER A LAS ETAPAS', W/2, 296, '#fff', 5);
+  }
+  ctx.textAlign='left';
+}
+
+function gameover(){
+  ctx.fillStyle='rgba(8,12,18,.84)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  ctx.font='bold 44px Impact,Arial Black,sans-serif';
+  outText('ABANDONO', W/2, H/2-60, '#ff6a3a', 7);
+  panel(W/2-170, H/2-40, 340, 92, 10);
+  ctx.font='11px Arial'; ctx.fillStyle='rgba(255,255,255,.65)';
+  ctx.fillText('Se acabaron las tres caídas antes de la meta', W/2, H/2-16);
+  ctx.font='bold 16px Impact,Arial Black,sans-serif'; ctx.fillStyle='#fff';
+  ctx.fillText((position/UNITS_PER_KM).toFixed(2)+' de '+S().km.toFixed(1)+' KM', W/2, H/2+14);
+  ctx.font='10px Arial'; ctx.fillStyle='#6fd0ff';
+  ctx.fillText('Tu mejor tiempo en esta etapa: '+fmtTime(bestTime[stageId]), W/2, H/2+38);
+  if (Math.floor(elapsed*1.6)%2===0){
+    ctx.font='bold 15px Impact,Arial Black,sans-serif';
+    outText('▶  TOCA PARA REINTENTAR', W/2, H/2+84, '#fff', 5);
+  }
+  ctx.textAlign='left';
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  RENDER
+// ════════════════════════════════════════════════════════════════════
+function render(){
+  ctx.setTransform(1,0,0,1,0,0);
+  drawSky();
+
+  ctx.save();
+  if (shake > 0.05){
+    ctx.translate(rnd(-shake,shake), rnd(-shake,shake));
+  }
+  drawBackdrop();
+  renderRoad();
+  drawRider();
+  ctx.restore();
+
+  drawSpeedFx();
+
+  if (phase === 'playing') hud();
+  else if (phase === 'menu') menu();
+  else if (phase === 'finish') { hud(); finishScreen(); }
+  else { hud(); gameover(); }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  BUCLE — paso fijo + acumulador
+// ════════════════════════════════════════════════════════════════════
+var STEP = 1/60, acc = 0, last = 0;
+function frame(now){
+  requestAnimationFrame(frame);
+  if (!last) last = now;
+  var dt = Math.min(0.25, (now - last)/1000);
+  last = now;
+
+  if (phase === 'playing'){
+    acc += dt;
+    var guard = 0;
+    while (acc >= STEP && guard++ < 8){ update(STEP); acc -= STEP; }
+  } else {
+    elapsed += dt;
+    if (shake > 0) shake = Math.max(0, shake - dt*18);
+    if (flash > 0) flash = Math.max(0, flash - dt*3.4);
+    updateParts(dt);
+  }
+  if (splitFlash > 0) splitFlash = Math.max(0, splitFlash - dt*1.6);
+  updateRig(dt);
+  updateWind();
+  try { render(); } catch(e){ console.error(e); }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  CONTROLES
+// ════════════════════════════════════════════════════════════════════
+var KEYMAP = {
+  ArrowLeft:'left', KeyA:'left', ArrowRight:'right', KeyD:'right',
+  ArrowUp:'up', KeyW:'up', ArrowDown:'down', KeyS:'down',
+  Space:'jump', ShiftLeft:'brake'
+};
+// Desde el menú, ← → eligen etapa y cualquier otra tecla larga.
+// Desde meta o abandono, se vuelve al menú de etapas.
+function advance(){
+  if (phase === 'menu'){ stageId = STAGE_IDS[pickIdx]; resetRun(); }
+  else if (phase === 'finish'){ phase = 'menu'; }
+  else if (phase === 'gameover'){ resetRun(); }
+}
+document.addEventListener('keydown', function(e){
+  var k = KEYMAP[e.code];
+  if (k){ keys[k] = true; e.preventDefault(); }
+  initAudio();
+  if (phase === 'menu' && (k === 'left' || k === 'right')){
+    pickIdx = k === 'left' ? 0 : 1;
+    return;
+  }
+  if (phase !== 'playing') advance();
+});
+document.addEventListener('keyup', function(e){
+  var k = KEYMAP[e.code];
+  if (k) keys[k] = false;
+});
+
+function touchX(e){
+  var r = cv.getBoundingClientRect();
+  var t = e.touches[0];
+  if (cv._portrait){ return (1 - (t.clientY - r.top)/r.height) * W; }
+  return (t.clientX - r.left)/r.width * W;
+}
+function touchY(e){
+  var r = cv.getBoundingClientRect();
+  var t = e.touches[0];
+  if (cv._portrait){ return (t.clientX - r.left)/r.width * H; }
+  return (t.clientY - r.top)/r.height * H;
+}
+cv.addEventListener('touchstart', function(e){
+  e.preventDefault(); initAudio();
+  if (phase === 'menu'){ pickIdx = touchX(e) < W/2 ? 0 : 1; advance(); return; }
+  if (phase !== 'playing'){ advance(); return; }
+  var x = touchX(e), y = touchY(e);
+  if (y < H*0.45){ // mitad superior = trucos
+    keys.up = x > W/2; keys.down = x <= W/2;
+    touchJump = true;
+  } else {
+    touchDir = x < W*0.42 ? -1 : (x > W*0.58 ? 1 : 0);
+    if (touchDir === 0) touchJump = true;
+  }
+}, {passive:false});
+cv.addEventListener('touchmove', function(e){
+  e.preventDefault();
+  if (phase !== 'playing') return;
+  var x = touchX(e), y = touchY(e);
+  if (y >= H*0.45) touchDir = x < W*0.42 ? -1 : (x > W*0.58 ? 1 : 0);
+}, {passive:false});
+cv.addEventListener('touchend', function(){ touchDir = 0; keys.up=false; keys.down=false; }, {passive:false});
+cv.addEventListener('click', function(e){
+  initAudio();
+  if (phase === 'playing') return;
+  if (phase === 'menu'){
+    var r = cv.getBoundingClientRect();
+    pickIdx = ((e.clientX - r.left) / r.width) < 0.5 ? 0 : 1;
+  }
+  advance();
+});
+
+document.getElementById('skinBtn').addEventListener('click', function(e){
+  e.stopPropagation();
+  skin = SKINS[(SKINS.indexOf(skin)+1) % SKINS.length];
+  this.textContent = SKIN_LABEL[skin];
+});
+document.getElementById('muteBtn').addEventListener('click', function(e){
+  e.stopPropagation();
+  muted = !muted;
+  this.textContent = muted ? '🔇' : '🔊';
+});
+
+// ════════════════════════════════════════════════════════════════════
+//  ESCALADO A PANTALLA
+// ════════════════════════════════════════════════════════════════════
+function resize(){
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var portrait = vw < vh;
+  cv._portrait = portrait;
+  if (portrait){
+    var s = Math.min(vw/H, vh/W);
+    cv.style.width = W+'px'; cv.style.height = H+'px';
+    cv.style.transformOrigin = (W/2)+'px '+(H/2)+'px';
+    cv.style.transform = 'translate('+((vw-W)/2)+'px,'+((vh-H)/2)+'px) rotate(-90deg) scale('+s+')';
+  } else {
+    var s2 = Math.min(vw/W, vh/H);
+    cv.style.width = W+'px'; cv.style.height = H+'px';
+    cv.style.transformOrigin = 'center center';
+    cv.style.transform = 'scale('+s2+')';
+  }
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', function(){ setTimeout(resize, 150); });
+
+// ── Arranque ────────────────────────────────────────────────────────
+buildSprites();
+resetTrack();
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
