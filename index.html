@@ -7,14 +7,20 @@
 <title>DESCENSO — Gravitas</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{width:100%;height:100%;overflow:hidden;background:#0d1014;touch-action:none}
-body{display:flex;justify-content:center;align-items:center;font-family:'Segoe UI',Arial,sans-serif}
-canvas{position:absolute;transform-origin:center center;touch-action:none;
-  box-shadow:0 0 80px rgba(0,0,0,.6);image-rendering:auto}
-/* Fila de botones centrada arriba. En flex se reacomodan solos cuando
-   el de compartir se agranda al llegar a meta, sin taparse entre si. */
-#hudBtns{position:fixed;z-index:50;top:max(10px,env(safe-area-inset-top));
-  left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center}
+html,body{width:100%;height:100dvh;min-height:100%;overflow:hidden;
+  background:#0d1014;touch-action:none;overscroll-behavior:none}
+body{font-family:'Segoe UI',Arial,sans-serif}
+/* El juego entero vive dentro de #stage, un rectangulo de 800x450.
+   Rotar y escalar UN SOLO contenedor es lo que hace que en vertical no
+   quede cortado: antes se transformaba el canvas por un lado y los
+   botones por otro, y nunca coincidian. */
+#stage{position:fixed;left:50%;top:50%;width:800px;height:450px;
+  transform-origin:50% 50%;box-shadow:0 0 80px rgba(0,0,0,.6)}
+#c{position:absolute;left:0;top:0;width:800px;height:450px;
+  touch-action:none;image-rendering:auto;display:block}
+/* Fila de botones, ahora dentro del contenedor: rota y escala con el juego */
+#hudBtns{position:absolute;z-index:50;top:10px;left:50%;
+  transform:translateX(-50%);display:flex;gap:8px;align-items:center}
 .btn{position:relative;flex:0 0 auto;width:42px;height:42px;border-radius:50%;
   background:rgba(20,26,32,.8);border:2px solid rgba(120,200,255,.35);color:#fff;
   font-size:17px;display:flex;align-items:center;justify-content:center;cursor:pointer;
@@ -32,12 +38,14 @@ canvas{position:absolute;transform-origin:center center;touch-action:none;
 </style>
 </head>
 <body>
+<div id="stage">
 <canvas id="c" width="800" height="450"></canvas>
 <div id="hudBtns">
 <button class="btn" id="skinBtn">🚵 MTB</button>
 <button class="btn" id="viewBtn" aria-label="Cambiar vista">👁</button>
 <button class="btn" id="shareBtn" aria-label="Compartir por WhatsApp">📲</button>
 <button class="btn" id="muteBtn">🔊</button>
+</div>
 </div>
 <script>
 "use strict";
@@ -50,6 +58,7 @@ canvas{position:absolute;transform-origin:center center;touch-action:none;
 // ════════════════════════════════════════════════════════════════════
 
 var cv = document.getElementById('c'), ctx = cv.getContext('2d');
+var stage = document.getElementById('stage');
 var W = 800, H = 450;
 
 // ─── Config del mundo ───────────────────────────────────────────────
@@ -2468,20 +2477,20 @@ function resize(){
   var vw = window.innerWidth, vh = window.innerHeight;
   var portrait = vw < vh;
   cv._portrait = portrait;
-  if (portrait){
-    var s = Math.min(vw/H, vh/W);
-    cv.style.width = W+'px'; cv.style.height = H+'px';
-    cv.style.transformOrigin = (W/2)+'px '+(H/2)+'px';
-    cv.style.transform = 'translate('+((vw-W)/2)+'px,'+((vh-H)/2)+'px) rotate(-90deg) scale('+s+')';
-  } else {
-    var s2 = Math.min(vw/W, vh/H);
-    cv.style.width = W+'px'; cv.style.height = H+'px';
-    cv.style.transformOrigin = 'center center';
-    cv.style.transform = 'scale('+s2+')';
-  }
+  // El contenedor se centra con translate(-50%,-50%) sobre su propio
+  // tamano, asi que no depende de donde lo ponga el flujo de la pagina.
+  // Esa era la causa de que en vertical quedara cortado.
+  var s = portrait ? Math.min(vw/H, vh/W) : Math.min(vw/W, vh/H);
+  stage.style.transform = 'translate(-50%,-50%)' +
+                          (portrait ? ' rotate(-90deg)' : '') +
+                          ' scale(' + s + ')';
+  cv._scale = s;
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', function(){ setTimeout(resize, 150); });
+// En movil la barra de direcciones aparece y desaparece: hay que
+// recalcular o el juego queda descuadrado a media partida.
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
 
 // ── Arranque ────────────────────────────────────────────────────────
 buildSprites();
